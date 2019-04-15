@@ -42,25 +42,21 @@ func Exec(src string) error {
 		methods: make(map[string]map[string]reflect.Value),
 	}
 
-	var mainfunc *ast.FuncDecl
-
 	for _, decl := range f.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
-			if d.Name.Name == "main" {
-				mainfunc = d
-			} else {
-				sc.evalFuncDecl(d)
-			}
+			sc.evalFuncDecl(d)
 		case *ast.GenDecl:
 			sc.evalDecl(d)
 		}
 	}
-	if mainfunc == nil {
-		return errors.New("no main function")
+
+	main, ok := sc.funcs["main"]
+	if !ok {
+		return errors.New("missing main function")
 	}
 
-	sc.main(mainfunc)
+	main.Call(nil)
 
 	return nil
 }
@@ -84,13 +80,6 @@ type scope struct {
 
 	// types maps type names to runtime types
 	types map[string]reflect.Type
-}
-
-// main evaluates the main function.
-func (sc *scope) main(f *ast.FuncDecl) {
-	for _, stmt := range f.Body.List {
-		sc.eval(stmt)
-	}
 }
 
 // eval evaluates a statement.
@@ -231,12 +220,20 @@ func (sc *scope) evalIntMul(x, y reflect.Value) reflect.Value {
 
 // evalFuncDecl evaluates a function declaration.
 func (sc *scope) evalFuncDecl(fd *ast.FuncDecl) {
-	var recvfield *ast.Field // receiver, if any
+	var (
+		recvfield *ast.Field   // receiver, if any
+		fparams   []*ast.Field // formal parameters, if any
+		fresults  []*ast.Field // formal results, if any
+	)
 	if fd.Recv != nil {
 		recvfield = fd.Recv.List[0]
 	}
-	fparams := fd.Type.Params.List   // formal parameters
-	fresults := fd.Type.Results.List // formal results
+	if fd.Type.Params != nil {
+		fparams = fd.Type.Params.List
+	}
+	if fd.Type.Results != nil {
+		fresults = fd.Type.Results.List
+	}
 
 	fn := func(params []reflect.Value) []reflect.Value {
 		if recvfield != nil {
@@ -262,8 +259,8 @@ func (sc *scope) evalFuncDecl(fd *ast.FuncDecl) {
 				return values
 			}
 		}
-		panicf("did not return from function call")
-		return nil // unreachable
+		// no return statement
+		return nil
 	}
 
 	var (
