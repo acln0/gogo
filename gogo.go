@@ -259,14 +259,14 @@ func (sc *scope) evalFuncDecl(fd *ast.FuncDecl) {
 	fn := func(params []reflect.Value) []reflect.Value {
 		if recvfield != nil {
 			name := recvfield.Names[0].Name
-			sc.addValue(name, params[0])
-			defer sc.removeValue(name)
+			sc.values[name] = params[0]
+			defer delete(sc.values, name)
 			params = params[1:]
 		}
 		for idx, fparam := range fparams {
 			name := fparam.Names[0].Name
-			sc.addValue(name, params[idx])
-			defer sc.removeValue(name)
+			sc.values[name] = params[idx]
+			defer delete(sc.values, name)
 		}
 		for _, fresult := range fresults {
 			if len(fresult.Names) != 0 {
@@ -338,7 +338,7 @@ func (sc *scope) evalConstSpec(vspec *ast.ValueSpec) {
 		switch ve := vexpr.(type) {
 		case *ast.BasicLit:
 			cval := constant.MakeFromLiteral(ve.Value, ve.Kind, 0)
-			sc.addConst(name.Name, cval)
+			sc.consts[name.Name] = cval
 		case *ast.Ident:
 			sc.unresolvedConsts[name.Name] = ve.Name
 		default:
@@ -399,32 +399,12 @@ func (sc *scope) resolveConsts() {
 				dep = sc.unresolvedConsts[dep]
 				continue
 			} else {
-				sc.addConst(name, cval)
+				sc.consts[name] = cval
 				delete(sc.unresolvedConsts, name)
 				break
 			}
 		}
 	}
-}
-
-// addValue adds a value to the scope.
-func (sc *scope) addValue(name string, val reflect.Value) {
-	sc.values[name] = val
-}
-
-// removeValue removes a value from the scope.
-func (sc *scope) removeValue(name string) {
-	delete(sc.values, name)
-}
-
-// addConst adds a constant to the scope.
-func (sc *scope) addConst(name string, val constant.Value) {
-	sc.consts[name] = val
-}
-
-// removeConst removes a constant from the scope.
-func (sc *scope) removeConst(name string) {
-	delete(sc.consts, name)
 }
 
 func (sc *scope) err(format string, args ...interface{}) {
