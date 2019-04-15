@@ -24,8 +24,10 @@ import (
 	"time"
 )
 
+const answer = 42
+
 func main() {
-	fmt.Println(time.Now())
+	fmt.Printf("the answer at %v is %v\n", time.Now(), answer)
 }
 `
 

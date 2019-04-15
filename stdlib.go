@@ -20,10 +20,17 @@ import (
 	"time"
 )
 
+// pkg represents a Go package
+type pkg struct {
+	// Func maps package-level functions
+	Func map[string]reflect.Value
+}
+
 var stdlib = map[string]pkg{
 	"fmt": {
 		Func: map[string]reflect.Value{
 			"Println": reflect.ValueOf(fmt.Println),
+			"Printf":  reflect.ValueOf(fmt.Printf),
 		},
 	},
 	"time": {
