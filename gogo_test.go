@@ -26,8 +26,13 @@ import (
 
 const answer = 42
 
+func square(x int) int {
+	return x * x
+}
+
 func main() {
 	fmt.Printf("the answer at %v is %v\n", time.Now(), answer)
+	fmt.Printf("%d squared is %d\n", 5, square(5))
 }
 `
 

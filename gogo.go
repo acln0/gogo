@@ -35,19 +35,22 @@ func Exec(src string) error {
 	}
 
 	sc := &scope{
-		std:    stdlib,
-		values: make(map[string]reflect.Value),
-		consts: make(map[string]constant.Value),
+		std:     stdlib,
+		values:  make(map[string]reflect.Value),
+		consts:  make(map[string]constant.Value),
+		funcs:   make(map[string]reflect.Value),
+		methods: make(map[string]map[string]reflect.Value),
 	}
 
 	var mainfunc *ast.FuncDecl
-findmain:
+
 	for _, decl := range f.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
 			if d.Name.Name == "main" {
 				mainfunc = d
-				break findmain
+			} else {
+				sc.evalFuncDecl(d)
 			}
 		case *ast.GenDecl:
 			sc.evalDecl(d)
@@ -72,6 +75,15 @@ type scope struct {
 
 	// const maps identifiers to constants
 	consts map[string]constant.Value
+
+	// funcs maps function names to runtime function values
+	funcs map[string]reflect.Value
+
+	// methods maps methods to sets of runtime function values
+	methods map[string]map[string]reflect.Value
+
+	// types maps type names to runtime types
+	types map[string]reflect.Type
 }
 
 // main evaluates the main function.
@@ -82,10 +94,15 @@ func (sc *scope) main(f *ast.FuncDecl) {
 }
 
 // eval evaluates a statement.
-func (sc *scope) eval(stmt ast.Stmt) {
+func (sc *scope) eval(stmt ast.Stmt) []reflect.Value {
 	switch s := stmt.(type) {
 	case *ast.ExprStmt:
-		sc.evalExpr(s.X)
+		return sc.evalExpr(s.X)
+	case *ast.ReturnStmt:
+		return sc.evalReturn(s)
+	default:
+		panicf("cannot handle %T statement", stmt)
+		return nil // unreachable
 	}
 }
 
@@ -98,9 +115,20 @@ func (sc *scope) evalExpr(expr ast.Expr) []reflect.Value {
 		return []reflect.Value{sc.evalIdent(e)}
 	case *ast.BasicLit:
 		return []reflect.Value{sc.evalBasicLit(e)}
+	case *ast.BinaryExpr:
+		return []reflect.Value{sc.evalBinaryExpr(e)}
 	}
 	panicf("cannot handle %T expression\n", expr)
 	return nil // unreachable
+}
+
+// evalReturn evaluates a return statement.
+func (sc *scope) evalReturn(ret *ast.ReturnStmt) []reflect.Value {
+	var values []reflect.Value
+	for _, res := range ret.Results {
+		values = append(values, sc.evalExpr(res)[0])
+	}
+	return values
 }
 
 // evalCallExpr evaluates a call expression.
@@ -111,16 +139,27 @@ func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 	)
 
 	switch fexpr := call.Fun.(type) {
+	case *ast.Ident:
+		if f, ok := sc.funcs[fexpr.Name]; ok {
+			fn = f
+		}
 	case *ast.SelectorExpr:
 		switch x := fexpr.X.(type) {
 		case *ast.Ident:
 			if x.Obj == nil {
-				// stdlib package
-				fn = sc.std[x.Name].Func[fexpr.Sel.Name]
+				if f, ok := sc.funcs[x.Name]; ok {
+					fn = f
+				}
+				if f, ok := sc.std[x.Name].Func[fexpr.Sel.Name]; ok {
+					// stdlib
+					fn = f
+				}
 			}
 		default:
-			panicf("don't know how to handle %T", fexpr.X)
+			panicf("cannot handle selector of type %T", fexpr.X)
 		}
+	default:
+		panicf("cannot handle function expression of type %T", call.Fun)
 	}
 
 	for _, arg := range call.Args {
@@ -164,9 +203,88 @@ func (sc *scope) evalBasicLit(lit *ast.BasicLit) reflect.Value {
 		val, _ := strconv.Unquote(lit.Value)
 		return reflect.ValueOf(val)
 	default:
-		panicf("cannot evalue %v basic literal", lit.Kind)
+		panicf("cannot evaluate %v basic literal", lit.Kind)
 		return reflect.Value{} // unreachable
 	}
+}
+
+// evalBinaryExpr evaluates a binary expression.
+func (sc *scope) evalBinaryExpr(be *ast.BinaryExpr) reflect.Value {
+	switch be.Op {
+	case token.MUL:
+		x := sc.evalExpr(be.X)[0]
+		y := sc.evalExpr(be.Y)[0]
+		if x.Type().ConvertibleTo(builtinType["int64"]) {
+			res := reflect.New(x.Type())
+			res.Elem().SetInt(sc.evalIntMul(x, y).Int())
+			return res.Elem()
+		}
+	}
+	panicf("cannot evaluate binary expression of type %v", be.Op)
+	return reflect.Value{} // unreachable
+}
+
+// evalIntMul evaluates x * y, where x and y are convertible to integers.
+func (sc *scope) evalIntMul(x, y reflect.Value) reflect.Value {
+	return reflect.ValueOf(x.Int() * y.Int())
+}
+
+// evalFuncDecl evaluates a function declaration.
+func (sc *scope) evalFuncDecl(fd *ast.FuncDecl) {
+	var recvfield *ast.Field // receiver, if any
+	if fd.Recv != nil {
+		recvfield = fd.Recv.List[0]
+	}
+	fparams := fd.Type.Params.List   // formal parameters
+	fresults := fd.Type.Results.List // formal results
+
+	fn := func(params []reflect.Value) []reflect.Value {
+		if recvfield != nil {
+			name := recvfield.Names[0].Name
+			sc.addValue(name, params[0])
+			defer sc.removeValue(name)
+			params = params[1:]
+		}
+		for idx, fparam := range fparams {
+			name := fparam.Names[0].Name
+			sc.addValue(name, params[idx])
+			defer sc.removeValue(name)
+		}
+		for _, fresult := range fresults {
+			if len(fresult.Names) != 0 {
+				panic("cannot handle named returns")
+			}
+		}
+		for _, stmt := range fd.Body.List {
+			_, isReturn := stmt.(*ast.ReturnStmt)
+			values := sc.eval(stmt)
+			if isReturn {
+				return values
+			}
+		}
+		panicf("did not return from function call")
+		return nil // unreachable
+	}
+
+	var (
+		argtypes    []reflect.Type
+		returntypes []reflect.Type
+	)
+
+	if recvfield != nil {
+		argtypes = append(argtypes, sc.fieldType(recvfield))
+	}
+	for _, field := range fparams {
+		argtypes = append(argtypes, sc.fieldType(field))
+	}
+	for _, field := range fresults {
+		returntypes = append(returntypes, sc.fieldType(field))
+	}
+
+	variadic := false // TODO(acln): fix
+	ftype := reflect.FuncOf(argtypes, returntypes, variadic)
+
+	sc.funcs[fd.Name.Name] = reflect.MakeFunc(ftype, fn)
 }
 
 // evalDecl evaluates a declaration.
