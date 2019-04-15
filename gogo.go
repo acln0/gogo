@@ -35,11 +35,12 @@ func Exec(src string) error {
 	}
 
 	sc := &scope{
-		std:     stdlib,
-		values:  make(map[string]reflect.Value),
-		consts:  make(map[string]constant.Value),
-		funcs:   make(map[string]reflect.Value),
-		methods: make(map[string]map[string]reflect.Value),
+		std:              stdlib,
+		values:           make(map[string]reflect.Value),
+		consts:           make(map[string]constant.Value),
+		unresolvedConsts: make(map[string]string),
+		funcs:            make(map[string]reflect.Value),
+		methods:          make(map[string]map[string]reflect.Value),
 	}
 
 	for _, decl := range f.Decls {
@@ -50,6 +51,8 @@ func Exec(src string) error {
 			sc.evalDecl(d)
 		}
 	}
+
+	sc.resolveConsts()
 
 	main, ok := sc.funcs["main"]
 	if !ok {
@@ -69,8 +72,11 @@ type scope struct {
 	// value maps identifiers to runtime values
 	values map[string]reflect.Value
 
-	// const maps identifiers to constants
+	// consts maps identifiers to constants
 	consts map[string]constant.Value
+
+	// unresolvedConsts maps identifiers to unresolved const identifiers
+	unresolvedConsts map[string]string
 
 	// funcs maps function names to runtime function values
 	funcs map[string]reflect.Value
@@ -314,6 +320,8 @@ func (sc *scope) evalConstSpec(vspec *ast.ValueSpec) {
 		case *ast.BasicLit:
 			cval := constant.MakeFromLiteral(ve.Value, ve.Kind, 0)
 			sc.addConst(name.Name, cval)
+		case *ast.Ident:
+			sc.unresolvedConsts[name.Name] = ve.Name
 		default:
 			panicf("cannot handle %T constant expressions", vexpr)
 		}
@@ -337,6 +345,23 @@ func (sc *scope) evalImportSpec(i *ast.ImportSpec) {
 	}
 
 	sc.std[path] = stdpkg
+}
+
+// resolveConsts resolves all unresolved constants.
+func (sc *scope) resolveConsts() {
+	for name, dep := range sc.unresolvedConsts {
+		for {
+			cval, resolved := sc.consts[dep]
+			if !resolved {
+				dep = sc.unresolvedConsts[dep]
+				continue
+			} else {
+				sc.addConst(name, cval)
+				delete(sc.unresolvedConsts, name)
+				break
+			}
+		}
+	}
 }
 
 // addValue adds a value to the scope.
