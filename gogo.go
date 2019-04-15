@@ -294,16 +294,20 @@ func (sc *scope) evalFuncDecl(fd *ast.FuncDecl) {
 func (sc *scope) evalDecl(gd *ast.GenDecl) {
 	switch gd.Tok {
 	case token.CONST:
-		sc.evalConst(gd)
+		sc.evalConstDecl(gd)
+	case token.VAR:
+		sc.evalVarDecl(gd)
 	case token.IMPORT:
-		sc.evalImport(gd)
+		sc.evalImportDecl(gd)
+	case token.TYPE:
+		sc.evalTypeDecl(gd)
 	default:
-		panicf("cannot handle %v declaration", gd.Tok)
+		panicf("unreachable: %v GenDecl type", gd.Tok)
 	}
 }
 
-// evalConst evaluates a constant declaration.
-func (sc *scope) evalConst(gd *ast.GenDecl) {
+// evalConstDecl evaluates a constant declaration.
+func (sc *scope) evalConstDecl(gd *ast.GenDecl) {
 	for _, spec := range gd.Specs {
 		sc.evalConstSpec(spec.(*ast.ValueSpec))
 	}
@@ -328,8 +332,20 @@ func (sc *scope) evalConstSpec(vspec *ast.ValueSpec) {
 	}
 }
 
-// evalImport evaluates an import declaration.
-func (sc *scope) evalImport(gd *ast.GenDecl) {
+// evalVarDecl evaluates a variable declaration.
+func (sc *scope) evalVarDecl(gd *ast.GenDecl) {
+	for _, spec := range gd.Specs {
+		sc.evalVarSpec(spec.(*ast.ValueSpec))
+	}
+}
+
+// evalVarSpec evaluates a ValueSpec representing a variable declaration.
+func (sc *scope) evalVarSpec(vspec *ast.ValueSpec) {
+	panic("cannot evaluate variable spec")
+}
+
+// evalImportDecl evaluates an import declaration.
+func (sc *scope) evalImportDecl(gd *ast.GenDecl) {
 	for _, spec := range gd.Specs {
 		sc.evalImportSpec(spec.(*ast.ImportSpec))
 	}
@@ -345,6 +361,18 @@ func (sc *scope) evalImportSpec(i *ast.ImportSpec) {
 	}
 
 	sc.std[path] = stdpkg
+}
+
+// evalTypeDecl evaluates a type declaration.
+func (sc *scope) evalTypeDecl(gd *ast.GenDecl) {
+	for _, spec := range gd.Specs {
+		sc.evalTypeSpec(spec.(*ast.TypeSpec))
+	}
+}
+
+// evalTypeSpec evaluates a type spec.
+func (sc *scope) evalTypeSpec(ts *ast.TypeSpec) {
+	panic("cannot evaluate type spec")
 }
 
 // resolveConsts resolves all unresolved constants.
