@@ -29,6 +29,10 @@ const (
 	answer        = 42
 )
 
+func sum(x, y int) int {
+	return x + y
+}
+
 func square(x int) int {
 	return x * x
 }
@@ -36,6 +40,7 @@ func square(x int) int {
 func main() {
 	fmt.Printf("the answer at %v is %v\n", time.Now(), alsoTheAnswer)
 	fmt.Printf("%d squared is %d\n", 5, square(5))
+	fmt.Printf("%d + %d is %d\n", 3, 6, sum(3, 6))
 }
 `
 

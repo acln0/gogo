@@ -220,6 +220,14 @@ func (sc *scope) evalBasicLit(lit *ast.BasicLit) reflect.Value {
 // evalBinaryExpr evaluates a binary expression.
 func (sc *scope) evalBinaryExpr(be *ast.BinaryExpr) reflect.Value {
 	switch be.Op {
+	case token.ADD:
+		x := sc.evalExpr(be.X)[0]
+		y := sc.evalExpr(be.Y)[0]
+		if x.Type().ConvertibleTo(builtinType["int64"]) {
+			res := reflect.New(x.Type())
+			res.Elem().SetInt(sc.evalIntAdd(x, y).Int())
+			return res.Elem()
+		}
 	case token.MUL:
 		x := sc.evalExpr(be.X)[0]
 		y := sc.evalExpr(be.Y)[0]
@@ -234,7 +242,12 @@ func (sc *scope) evalBinaryExpr(be *ast.BinaryExpr) reflect.Value {
 	return reflect.Value{} // unreachable
 }
 
-// evalIntMul evaluates x * y, where x and y are convertible to integers.
+// evalIntAdd evaluates x + y, where x and y are integers.
+func (sc *scope) evalIntAdd(x, y reflect.Value) reflect.Value {
+	return reflect.ValueOf(x.Int() + y.Int())
+}
+
+// evalIntMul evaluates x * y, where x and y are integers.
 func (sc *scope) evalIntMul(x, y reflect.Value) reflect.Value {
 	return reflect.ValueOf(x.Int() * y.Int())
 }
@@ -263,10 +276,14 @@ func (sc *scope) evalFuncDecl(fd *ast.FuncDecl) {
 			defer delete(sc.values, name)
 			params = params[1:]
 		}
-		for idx, fparam := range fparams {
-			name := fparam.Names[0].Name
-			sc.values[name] = params[idx]
-			defer delete(sc.values, name)
+		idx := 0
+		for _, fparam := range fparams {
+			for _, ident := range fparam.Names {
+				name := ident.Name
+				sc.values[name] = params[idx]
+				defer delete(sc.values, name)
+				idx++
+			}
 		}
 		for _, fresult := range fresults {
 			if len(fresult.Names) != 0 {
@@ -293,7 +310,9 @@ func (sc *scope) evalFuncDecl(fd *ast.FuncDecl) {
 		argtypes = append(argtypes, sc.fieldType(recvfield))
 	}
 	for _, field := range fparams {
-		argtypes = append(argtypes, sc.fieldType(field))
+		for range field.Names {
+			argtypes = append(argtypes, sc.fieldType(field))
+		}
 	}
 	for _, field := range fresults {
 		returntypes = append(returntypes, sc.fieldType(field))
