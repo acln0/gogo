@@ -50,10 +50,10 @@ func (sc *scope) fieldType(f *ast.Field) reflect.Type {
 		return sc.arrayType(texp)
 	case *ast.StructType:
 		return sc.structType(texp)
-	default:
-		panicf("cannot handle field of type %T", f.Type)
-		return nil
 	}
+
+	sc.err("cannot handle field of type %T", f.Type)
+	return nil
 }
 
 func (sc *scope) namedType(name string) reflect.Type {
@@ -63,7 +63,8 @@ func (sc *scope) namedType(name string) reflect.Type {
 	if builtin, ok := builtinType[name]; ok {
 		return builtin
 	}
-	panicf("unknown named type %s", name)
+
+	sc.err("unknown named type %s", name)
 	return nil // unreachable
 }
 
@@ -75,13 +76,13 @@ func (sc *scope) arrayType(at *ast.ArrayType) reflect.Type {
 	case *ast.Ident:
 		etype = sc.namedType(texp.Name)
 	default:
-		panicf("cannot handle array element type %T", at.Elt)
+		sc.err("cannot handle array element type %T", at.Elt)
 	}
 
 	return reflect.ArrayOf(size, etype)
 }
 
 func (sc *scope) structType(st *ast.StructType) reflect.Type {
-	panicf("cannot handle struct types")
+	sc.err("cannot handle struct types")
 	return nil // unreachable
 }

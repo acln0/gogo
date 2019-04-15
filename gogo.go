@@ -22,12 +22,13 @@ import (
 	"go/parser"
 	"go/token"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 )
 
 // Exec executes the Go code specified by src.
-func Exec(src string) error {
+func Exec(src string) (err error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "gogosrc", src, 0)
 	if err != nil {
@@ -42,6 +43,19 @@ func Exec(src string) error {
 		funcs:            make(map[string]reflect.Value),
 		methods:          make(map[string]map[string]reflect.Value),
 	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			e, ok := r.(error)
+			if !ok {
+				panic(r)
+			}
+			if _, rok := e.(runtime.Error); rok {
+				panic(r)
+			}
+			err = e
+		}
+	}()
 
 	for _, decl := range f.Decls {
 		switch d := decl.(type) {
@@ -96,7 +110,7 @@ func (sc *scope) eval(stmt ast.Stmt) []reflect.Value {
 	case *ast.ReturnStmt:
 		return sc.evalReturn(s)
 	default:
-		panicf("cannot handle %T statement", stmt)
+		sc.err("cannot handle %T statement", stmt)
 		return nil // unreachable
 	}
 }
@@ -113,7 +127,7 @@ func (sc *scope) evalExpr(expr ast.Expr) []reflect.Value {
 	case *ast.BinaryExpr:
 		return []reflect.Value{sc.evalBinaryExpr(e)}
 	}
-	panicf("cannot handle %T expression\n", expr)
+	sc.err("cannot handle %T expression", expr)
 	return nil // unreachable
 }
 
@@ -151,10 +165,10 @@ func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 				}
 			}
 		default:
-			panicf("cannot handle selector of type %T", fexpr.X)
+			sc.err("cannot handle selector of type %T", fexpr.X)
 		}
 	default:
-		panicf("cannot handle function expression of type %T", call.Fun)
+		sc.err("cannot handle function expression of type %T", call.Fun)
 	}
 
 	for _, arg := range call.Args {
@@ -180,11 +194,11 @@ func (sc *scope) evalIdent(ident *ast.Ident) reflect.Value {
 			val, _ := constant.Int64Val(v)
 			return reflect.ValueOf(val)
 		default:
-			panicf("cannot handle %v constant", v.String())
+			sc.err("cannot handle %v constant", v.String())
 		}
 	}
 
-	panicf("value for identifier %s not found", ident.Name)
+	sc.err("value for identifier %s not found", ident.Name)
 	return reflect.Value{} // unreachable
 }
 
@@ -197,10 +211,10 @@ func (sc *scope) evalBasicLit(lit *ast.BasicLit) reflect.Value {
 	case token.STRING:
 		val, _ := strconv.Unquote(lit.Value)
 		return reflect.ValueOf(val)
-	default:
-		panicf("cannot evaluate %v basic literal", lit.Kind)
-		return reflect.Value{} // unreachable
 	}
+
+	sc.err("cannot evaluate %v basic literal", lit.Kind)
+	return reflect.Value{} // unreachable
 }
 
 // evalBinaryExpr evaluates a binary expression.
@@ -215,7 +229,8 @@ func (sc *scope) evalBinaryExpr(be *ast.BinaryExpr) reflect.Value {
 			return res.Elem()
 		}
 	}
-	panicf("cannot evaluate binary expression of type %v", be.Op)
+
+	sc.err("cannot evaluate binary expression of type %v", be.Op)
 	return reflect.Value{} // unreachable
 }
 
@@ -302,7 +317,7 @@ func (sc *scope) evalDecl(gd *ast.GenDecl) {
 	case token.TYPE:
 		sc.evalTypeDecl(gd)
 	default:
-		panicf("unreachable: %v GenDecl type", gd.Tok)
+		sc.err("unreachable: %v GenDecl type", gd.Tok)
 	}
 }
 
@@ -316,7 +331,7 @@ func (sc *scope) evalConstDecl(gd *ast.GenDecl) {
 // evalConstSpec evaluates a ValueSpec representing a constant declaration.
 func (sc *scope) evalConstSpec(vspec *ast.ValueSpec) {
 	if vspec.Type != nil {
-		panicf("cannot handle typed consts")
+		sc.err("cannot handle typed consts")
 	}
 	for idx, name := range vspec.Names {
 		vexpr := vspec.Values[idx]
@@ -327,7 +342,7 @@ func (sc *scope) evalConstSpec(vspec *ast.ValueSpec) {
 		case *ast.Ident:
 			sc.unresolvedConsts[name.Name] = ve.Name
 		default:
-			panicf("cannot handle %T constant expressions", vexpr)
+			sc.err("cannot handle %T constant expressions", vexpr)
 		}
 	}
 }
@@ -357,7 +372,7 @@ func (sc *scope) evalImportSpec(i *ast.ImportSpec) {
 	path := strings.Trim(i.Path.Value, `"`)
 	stdpkg, ok := stdlib[path]
 	if !ok {
-		panicf("non-stdlib import path %s", path)
+		sc.err("non-stdlib import path %s", path)
 	}
 
 	sc.std[path] = stdpkg
@@ -412,6 +427,6 @@ func (sc *scope) removeConst(name string) {
 	delete(sc.consts, name)
 }
 
-func panicf(format string, args ...interface{}) {
-	panic(fmt.Sprintf(format, args...))
+func (sc *scope) err(format string, args ...interface{}) {
+	panic(fmt.Errorf(format, args...))
 }
