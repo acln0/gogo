@@ -80,25 +80,29 @@ func Exec(src string) (err error) {
 
 // scope represents a scope.
 type scope struct {
-	// std holds standard library packages
+	// parent is the parent scope, or nil if the scope represents the
+	// top-level package scope.
+	parent *scope
+
+	// std holds standard library packages.
 	std map[string]pkg
 
-	// value maps identifiers to runtime values
+	// value maps identifiers to runtime values.
 	values map[string]reflect.Value
 
-	// consts maps identifiers to constants
+	// consts maps identifiers to constants.
 	consts map[string]constant.Value
 
-	// unresolvedConsts maps identifiers to unresolved const identifiers
+	// unresolvedConsts maps identifiers to unresolved const identifiers.
 	unresolvedConsts map[string]string
 
-	// funcs maps function names to runtime function values
+	// funcs maps function names to runtime function values.
 	funcs map[string]reflect.Value
 
-	// methods maps methods to sets of runtime function values
+	// methods maps methods to sets of runtime function values.
 	methods map[string]map[string]reflect.Value
 
-	// types maps type names to runtime types
+	// types maps type names to runtime types.
 	types map[string]reflect.Type
 }
 
@@ -287,7 +291,7 @@ func (sc *scope) evalFuncDecl(fd *ast.FuncDecl) {
 		}
 		for _, fresult := range fresults {
 			if len(fresult.Names) != 0 {
-				panic("cannot handle named returns")
+				sc.err("cannot handle named returns")
 			}
 		}
 		for _, stmt := range fd.Body.List {
@@ -315,7 +319,13 @@ func (sc *scope) evalFuncDecl(fd *ast.FuncDecl) {
 		}
 	}
 	for _, field := range fresults {
-		returntypes = append(returntypes, sc.fieldType(field))
+		if len(field.Names) > 0 {
+			for range field.Names {
+				returntypes = append(returntypes, sc.fieldType(field))
+			}
+		} else {
+			returntypes = append(returntypes, sc.fieldType(field))
+		}
 	}
 
 	variadic := false // TODO(acln): fix
@@ -375,7 +385,7 @@ func (sc *scope) evalVarDecl(gd *ast.GenDecl) {
 
 // evalVarSpec evaluates a ValueSpec representing a variable declaration.
 func (sc *scope) evalVarSpec(vspec *ast.ValueSpec) {
-	panic("cannot evaluate variable spec")
+	sc.err("cannot evaluate variable spec")
 }
 
 // evalImportDecl evaluates an import declaration.
@@ -406,7 +416,7 @@ func (sc *scope) evalTypeDecl(gd *ast.GenDecl) {
 
 // evalTypeSpec evaluates a type spec.
 func (sc *scope) evalTypeSpec(ts *ast.TypeSpec) {
-	panic("cannot evaluate type spec")
+	sc.err("cannot evaluate type spec")
 }
 
 // resolveConsts resolves all unresolved constants.
