@@ -127,7 +127,6 @@ func maps() {
 }
 
 func main() {
-/*
 	fmt.Println("==== package level ====")
 	x := 1001
 	y := 1002
@@ -143,7 +142,6 @@ func main() {
 	methods()
 	hr()
 
-*/
 	fmt.Println("==== maps ====")
 	maps()
 	hr()
