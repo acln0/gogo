@@ -165,6 +165,24 @@ func goroutines() {
 	}
 }
 
+func flowcontrol() {
+	x := 42
+	if x == 42 {
+		fmt.Println("x is 42 indeed")
+	}
+
+	y := 23
+	if y == 24 {
+		fmt.Println("y is 24?!")
+	} else {
+		fmt.Println("y is not 24")
+	}
+
+	for i := 0; i < 5; i++ {
+		fmt.Println(i)
+	}
+}
+
 func main() {
 	fmt.Println("==== package level ====")
 	x := 1001
@@ -187,6 +205,10 @@ func main() {
 
 	fmt.Println("==== goroutines ====")
 	goroutines()
+	hr()
+
+	fmt.Println("==== flow control ====")
+	flowcontrol()
 	hr()
 }
 

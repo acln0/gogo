@@ -169,6 +169,15 @@ func (sc *scope) eval(stmt ast.Stmt) []reflect.Value {
 	case *ast.SelectStmt:
 		sc.evalSelect(s)
 		return nil
+	case *ast.IfStmt:
+		sc.evalIf(s)
+		return nil
+	case *ast.ForStmt:
+		sc.evalFor(s)
+		return nil
+	case *ast.IncDecStmt:
+		sc.evalIncDec(s)
+		return nil
 	default:
 		sc.err("cannot handle %T statement", stmt)
 		return nil // unreachable
@@ -422,6 +431,67 @@ func (sc *scope) evalSelect(ss *ast.SelectStmt) {
 		}
 		child.eval(stmt)
 	}
+}
+
+// evalIf evaluates an if statement.
+func (sc *scope) evalIf(is *ast.IfStmt) {
+	sc = sc.enter("")
+	if is.Init != nil {
+		sc.eval(is.Init)
+	}
+	cond := sc.evalExpr(is.Cond)[0].Bool()
+	if cond {
+		for _, stmt := range is.Body.List {
+			sc.eval(stmt)
+		}
+	} else {
+		if is.Else != nil {
+			for _, stmt := range is.Else.(*ast.BlockStmt).List {
+				sc.eval(stmt)
+			}
+		}
+	}
+}
+
+// evalFor evaluates a for statement.
+func (sc *scope) evalFor(fs *ast.ForStmt) {
+	sc = sc.enter("")
+	if fs.Init != nil {
+		sc.eval(fs.Init)
+	}
+	for {
+		if fs.Cond != nil {
+			cond := sc.evalExpr(fs.Cond)[0].Bool()
+			if !cond {
+				return
+			}
+		}
+
+		for _, stmt := range fs.Body.List {
+			sc.eval(stmt)
+		}
+
+		if fs.Post != nil {
+			sc.eval(fs.Post)
+		}
+	}
+}
+
+// evalIncDec evaluates ++ or --
+func (sc *scope) evalIncDec(ids *ast.IncDecStmt) {
+	var delta int64
+
+	switch ids.Tok {
+	case token.INC:
+		delta = 1
+	case token.DEC:
+		delta = -1
+	default:
+		sc.err("bogus token %v in IncDec statament", ids.Tok)
+	}
+
+	val := sc.evalExpr(ids.X)[0]
+	val.Set(reflect.ValueOf(val.Int() + delta).Convert(val.Type()))
 }
 
 // evalCallExpr evaluates a call expression.
@@ -808,10 +878,10 @@ func (sc *scope) evalUnaryExpr(ue *ast.UnaryExpr, okformrecv bool) []reflect.Val
 
 // evalBinaryExpr evaluates a binary expression.
 func (sc *scope) evalBinaryExpr(be *ast.BinaryExpr) reflect.Value {
+	x := sc.evalExpr(be.X)[0]
+	y := sc.evalExpr(be.Y)[0]
 	switch be.Op {
 	case token.ADD:
-		x := sc.evalExpr(be.X)[0]
-		y := sc.evalExpr(be.Y)[0]
 		switch {
 		case x.Type().ConvertibleTo(builtinType["int64"]):
 			res := reflect.New(x.Type())
@@ -823,11 +893,21 @@ func (sc *scope) evalBinaryExpr(be *ast.BinaryExpr) reflect.Value {
 			return res.Elem()
 		}
 	case token.MUL:
-		x := sc.evalExpr(be.X)[0]
-		y := sc.evalExpr(be.Y)[0]
 		if x.Type().ConvertibleTo(builtinType["int64"]) {
 			res := reflect.New(x.Type())
 			res.Elem().SetInt(sc.evalIntMul(x, y).Int())
+			return res.Elem()
+		}
+	case token.EQL:
+		res := reflect.New(reflect.TypeOf(true))
+		equal := reflect.DeepEqual(x.Interface(), y.Interface())
+		res.Elem().SetBool(equal)
+		return res.Elem()
+	case token.LSS:
+		if x.Type().ConvertibleTo(builtinType["int64"]) {
+			res := reflect.New(reflect.TypeOf(true))
+			less := x.Int() < y.Int()
+			res.Elem().SetBool(less)
 			return res.Elem()
 		}
 	}
