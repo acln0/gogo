@@ -162,6 +162,8 @@ func (sc *scope) evalExpr(expr ast.Expr) []reflect.Value {
 		return []reflect.Value{sc.evalIdent(e)}
 	case *ast.BasicLit:
 		return []reflect.Value{sc.evalBasicLit(e)}
+	case *ast.UnaryExpr:
+		return []reflect.Value{sc.evalUnaryExpr(e)}
 	case *ast.BinaryExpr:
 		return []reflect.Value{sc.evalBinaryExpr(e)}
 	case *ast.CompositeLit:
@@ -292,6 +294,20 @@ func (sc *scope) evalBasicLit(lit *ast.BasicLit) reflect.Value {
 
 	sc.err("cannot evaluate %v basic literal", lit.Kind)
 	return reflect.Value{} // unreachable
+}
+
+// evalUnaryExpr evaluates a unary expression.
+func (sc *scope) evalUnaryExpr(ue *ast.UnaryExpr) reflect.Value {
+	switch ue.Op {
+	case token.AND:
+		val := sc.evalExpr(ue.X)[0]
+		ptr := reflect.New(val.Type())
+		ptr.Elem().Set(val)
+		return ptr
+	default:
+		sc.err("cannot handle %v operand in unary expression", ue.Op)
+		return reflect.Value{} // unreachable
+	}
 }
 
 // evalBinaryExpr evaluates a binary expression.

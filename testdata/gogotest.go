@@ -52,6 +52,7 @@ func main() {
 	xs, ys := swap(x, y)
 	fmt.Printf("swapped x and y: x = %d, y = %d\n", xs, ys)
 
-	fmt.Printf("printing a keyed struct literal: %#v\n", Foo{X: 42, Y: "test1"})
-	fmt.Printf("printing an unkeyed struct literal: %#v\n", Foo{23, "test2"})
+	fmt.Printf("keyed struct literal: %#v\n", Foo{X: 42, Y: "test1"})
+	fmt.Printf("unkeyed struct literal: %#v\n", Foo{23, "test2"})
+	fmt.Printf("address of struct literal: %#v\n", &Foo{X: 22})
 }
