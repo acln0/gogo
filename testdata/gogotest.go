@@ -203,6 +203,16 @@ func flowcontrol() {
 	for i := 0; i < 5; i++ {
 		fmt.Println(i)
 	}
+
+	z := 42
+	switch z {
+	case 10:
+		fmt.Println("z is 10?")
+	case 23:
+		fmt.Println("z is 23?")
+	case 42:
+		fmt.Println("z is 42, according to the switch")
+	}
 }
 
 func main() {

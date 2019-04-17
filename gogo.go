@@ -178,6 +178,9 @@ func (sc *scope) eval(stmt ast.Stmt) []reflect.Value {
 	case *ast.IncDecStmt:
 		sc.evalIncDec(s)
 		return nil
+	case *ast.SwitchStmt:
+		sc.evalSwitch(s)
+		return nil
 	default:
 		sc.err("cannot handle %T statement", stmt)
 		return nil // unreachable
@@ -494,6 +497,48 @@ func (sc *scope) evalIncDec(ids *ast.IncDecStmt) {
 
 	val := sc.evalExpr(ids.X)[0]
 	val.Set(reflect.ValueOf(val.Int() + delta).Convert(val.Type()))
+}
+
+// evalSwitch evaluates a switch statement.
+func (sc *scope) evalSwitch(ss *ast.SwitchStmt) {
+	sc = sc.enter("")
+	if ss.Init != nil {
+		sc.eval(ss.Init)
+	}
+
+	var tagval reflect.Value
+	if ss.Tag != nil {
+		tagval = sc.evalExpr(ss.Tag)[0]
+	}
+
+	for _, stmt := range ss.Body.List {
+		clause := stmt.(*ast.CaseClause)
+
+		var cases []reflect.Value
+		for _, expr := range clause.List {
+			cases = append(cases, sc.evalExpr(expr)[0])
+		}
+
+		if tagval != (reflect.Value{}) {
+			for _, c := range cases {
+				if tagval.Interface() == c.Interface() {
+					for _, stmt := range clause.Body {
+						sc.eval(stmt)
+					}
+					return
+				}
+			}
+		} else {
+			for _, c := range cases {
+				if c.Bool() {
+					for _, stmt := range clause.Body {
+						sc.eval(stmt)
+					}
+					return
+				}
+			}
+		}
+	}
 }
 
 // evalCallExpr evaluates a call expression.
