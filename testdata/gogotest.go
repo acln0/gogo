@@ -127,6 +127,28 @@ func maps() {
 	fmt.Printf("after delete(mcap, %q): %v\n", "x", mcap)
 }
 
+func slices() {
+	numbers := make([]int, 1)
+	numbers[0] = 4
+	numbers = append(numbers, 8)
+	numbers = append(numbers, 15)
+	numbers = append(numbers, 16)
+	numbers = append(numbers, 23)
+	numbers = append(numbers, 42)
+
+	fmt.Printf("LOST: %v\n", numbers)
+
+	var x []int
+	x = append(x, numbers...)
+	fmt.Printf("LOST again: %v\n", x)
+
+	y := x[:2]
+	fmt.Printf("first two: %v (%d)\n", y, len(y))
+
+	z := x[2:5]
+	fmt.Printf("next three: %v (%d, %d)\n", z, len(z), cap(z))
+}
+
 func goroutines() {
 	ch := make(chan string)
 	go func() {
@@ -188,7 +210,6 @@ func main() {
 	x := 1001
 	y := 1002
 	fmt.Printf("package level sum: %d + %d = %d\n", x, y, packageLevelSum(x, y))
-
 	hr()
 
 	fmt.Println("==== basics ====")
@@ -201,6 +222,10 @@ func main() {
 
 	fmt.Println("==== maps ====")
 	maps()
+	hr()
+
+	fmt.Println("==== slices ====")
+	slices()
 	hr()
 
 	fmt.Println("==== goroutines ====")

@@ -207,6 +207,8 @@ func (sc *scope) evalExpr(expr ast.Expr) []reflect.Value {
 		return []reflect.Value{sc.evalFuncLit(e)}
 	case *ast.IndexExpr:
 		return sc.evalIndexExpr(e, reflect.Value{}, false)
+	case *ast.SliceExpr:
+		return []reflect.Value{sc.evalSliceExpr(e)}
 	}
 	sc.err("cannot handle %T expression", expr)
 	return nil // unreachable
@@ -522,6 +524,12 @@ func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 		case "close":
 			sc.evalBuiltinClose(call)
 			return nil
+		case "append":
+			return []reflect.Value{sc.evalBuiltinAppend(call)}
+		case "len":
+			return []reflect.Value{sc.evalBuiltinLen(call)}
+		case "cap":
+			return []reflect.Value{sc.evalBuiltinCap(call)}
 		}
 	case *ast.SelectorExpr:
 		switch x := fexpr.X.(type) {
@@ -771,6 +779,36 @@ func (sc *scope) evalBuiltinClose(call *ast.CallExpr) {
 	ch.Close()
 }
 
+// evalBuiltinAppend evaluates append(s, x), append(s, y, z) or append(s, k...).
+func (sc *scope) evalBuiltinAppend(call *ast.CallExpr) reflect.Value {
+	sval := sc.evalExpr(call.Args[0])[0]
+	varargs := reflect.MakeSlice(sval.Type(), 0, 0)
+
+	for _, rexpr := range call.Args[1:] {
+		for _, rval := range sc.evalExpr(rexpr) {
+			if rval.Kind() == reflect.Slice {
+				varargs = reflect.AppendSlice(varargs, rval)
+			} else {
+				varargs = reflect.Append(varargs, rval)
+			}
+		}
+	}
+
+	return reflect.AppendSlice(sval, varargs)
+}
+
+// evalBuiltinLen evaluates len(s).
+func (sc *scope) evalBuiltinLen(call *ast.CallExpr) reflect.Value {
+	val := sc.evalExpr(call.Args[0])[0]
+	return reflect.ValueOf(val.Len())
+}
+
+// evalBuiltinCap evaluates cap(s).
+func (sc *scope) evalBuiltinCap(call *ast.CallExpr) reflect.Value {
+	val := sc.evalExpr(call.Args[0])[0]
+	return reflect.ValueOf(val.Cap())
+}
+
 // evalIndexExpr evalueates b[0], s[x] = y and s["foo"] = 42.
 func (sc *scope) evalIndexExpr(idx *ast.IndexExpr, val reflect.Value, okform bool) []reflect.Value {
 	lhstype := sc.typeinfo.Types[idx.X].Type
@@ -793,11 +831,58 @@ func (sc *scope) evalIndexExpr(idx *ast.IndexExpr, val reflect.Value, okform boo
 			return []reflect.Value{mval, ok}
 		}
 		return []reflect.Value{mval}
+	case *types.Slice:
+		index := sc.evalExpr(idx.Index)[0].Int()
+		sval := sc.evalExpr(idx.X)[0].Index(int(index))
+
+		if val != (reflect.Value{}) {
+			sval.Set(val)
+			return nil
+		}
+		return []reflect.Value{sval}
 
 	default:
 		sc.err("cannot handle LHS expression of type %T in index expression", lhstype)
 		return nil // unreachable
 	}
+}
+
+// evalSliceExpr evaluates a slice expression.
+func (sc *scope) evalSliceExpr(se *ast.SliceExpr) reflect.Value {
+	sval := sc.evalExpr(se.X)[0]
+
+	if se.Slice3 {
+		var low, high, max int
+
+		if se.Low != nil {
+			low = int(sc.evalExpr(se.Low)[0].Int())
+		}
+		if se.High != nil {
+			high = int(sc.evalExpr(se.High)[0].Int())
+		} else {
+			high = sval.Len()
+		}
+		if se.Max != nil {
+			max = int(sc.evalExpr(se.Max)[0].Int())
+		} else {
+			max = sval.Cap()
+		}
+
+		return sval.Slice3(low, high, max)
+	}
+
+	var low, high int
+
+	if se.Low != nil {
+		low = int(sc.evalExpr(se.Low)[0].Int())
+	}
+	if se.High != nil {
+		high = int(sc.evalExpr(se.High)[0].Int())
+	} else {
+		high = sval.Len()
+	}
+
+	return sval.Slice(low, high)
 }
 
 // evalIdent evaluates an identifier.
@@ -1113,13 +1198,18 @@ func (sc *scope) evalConstDecl(gd *ast.GenDecl) {
 // evalVarDecl evaluates a variable declaration.
 func (sc *scope) evalVarDecl(gd *ast.GenDecl) {
 	for _, spec := range gd.Specs {
-		sc.evalVarSpec(spec.(*ast.ValueSpec))
+		vspec := spec.(*ast.ValueSpec)
+		for idx, name := range vspec.Names {
+			var val reflect.Value
+			if idx < len(vspec.Values) {
+				val = sc.evalExpr(vspec.Values[idx])[0]
+			} else {
+				valptr := reflect.New(sc.typeOf(vspec.Type))
+				val = valptr.Elem()
+			}
+			sc.values[name.Name] = val
+		}
 	}
-}
-
-// evalVarSpec evaluates a ValueSpec representing a variable declaration.
-func (sc *scope) evalVarSpec(vspec *ast.ValueSpec) {
-	sc.err("cannot evaluate variable spec")
 }
 
 // evalImportDecl evaluates an import declaration. Only standard library
