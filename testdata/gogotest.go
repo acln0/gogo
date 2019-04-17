@@ -126,6 +126,15 @@ func maps() {
 	fmt.Printf("after delete(mcap, %q): %v\n", "x", mcap)
 }
 
+func goroutines() {
+	ch := make(chan string)
+	go func() {
+		ch <- "hello"
+	}()
+	greeting := <-ch
+	fmt.Printf("the greeting is %s\n", greeting)
+}
+
 func main() {
 	fmt.Println("==== package level ====")
 	x := 1001
@@ -144,6 +153,10 @@ func main() {
 
 	fmt.Println("==== maps ====")
 	maps()
+	hr()
+
+	fmt.Println("==== goroutines ====")
+	goroutines()
 	hr()
 }
 

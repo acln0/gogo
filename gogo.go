@@ -158,6 +158,12 @@ func (sc *scope) eval(stmt ast.Stmt) []reflect.Value {
 		return nil
 	case *ast.DeclStmt:
 		return sc.evalDecl(s)
+	case *ast.GoStmt:
+		sc.evalGo(s)
+		return nil
+	case *ast.SendStmt:
+		sc.evalSend(s)
+		return nil
 	default:
 		sc.err("cannot handle %T statement", stmt)
 		return nil // unreachable
@@ -174,7 +180,7 @@ func (sc *scope) evalExpr(expr ast.Expr) []reflect.Value {
 	case *ast.BasicLit:
 		return []reflect.Value{sc.evalBasicLit(e)}
 	case *ast.UnaryExpr:
-		return []reflect.Value{sc.evalUnaryExpr(e)}
+		return sc.evalUnaryExpr(e)
 	case *ast.BinaryExpr:
 		return []reflect.Value{sc.evalBinaryExpr(e)}
 	case *ast.CompositeLit:
@@ -281,6 +287,19 @@ func (sc *scope) evalDecl(ds *ast.DeclStmt) []reflect.Value {
 	return nil
 }
 
+// evalGo evaluates a go statement.
+func (sc *scope) evalGo(gs *ast.GoStmt) {
+	child := sc.enter("")
+	go child.evalCallExpr(gs.Call)
+}
+
+// evalSend evaluates a send statement.
+func (sc *scope) evalSend(ss *ast.SendStmt) {
+	chanv := sc.evalExpr(ss.Chan)[0]
+	val := sc.evalExpr(ss.Value)[0]
+	chanv.Send(val)
+}
+
 // evalCallExpr evaluates a call expression.
 func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 	var (
@@ -322,6 +341,8 @@ func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 		default:
 			sc.err("cannot handle selector of type %T", fexpr.X)
 		}
+	case *ast.FuncLit:
+		fn = sc.evalFuncLit(fexpr)
 	default:
 		sc.err("cannot handle function expression of type %T", call.Fun)
 	}
@@ -396,24 +417,91 @@ func (sc *scope) lookupMethod(vtype types.Type, se *ast.SelectorExpr) (reflect.V
 
 // evalBuiltinMake calls the builtin make function.
 func (sc *scope) evalBuiltinMake(call *ast.CallExpr) []reflect.Value {
+	var argtype makeArgType
+	switch ut := underlyingType(sc.typeinfo.Types[call.Args[0]].Type); ut.(type) {
+	case *types.Slice:
+		argtype = sliceMakeArg
+	case *types.Map:
+		argtype = mapMakeArg
+	case *types.Chan:
+		argtype = chanMakeArg
+	default:
+		sc.err("unknown underlying type %T for make call", ut)
+		return nil // unreachable
+	}
+
 	switch len(call.Args) {
 	case 1:
-		return []reflect.Value{sc.evalBuiltinMakeMap1(call)}
+		switch argtype {
+		case mapMakeArg:
+			return []reflect.Value{sc.evalBuiltinMakeMap1(call)}
+		case chanMakeArg:
+			return []reflect.Value{sc.evalBuiltinMakeChan1(call)}
+		}
+		sc.err("unknown makeArgType %d", argtype)
+		return nil // unreachable
 	case 2:
-		return []reflect.Value{sc.evalBuiltinMakeMap2(call)}
+		switch argtype {
+		case sliceMakeArg:
+			return []reflect.Value{sc.evalBuiltinMakeSlice2(call)}
+		case mapMakeArg:
+			return []reflect.Value{sc.evalBuiltinMakeMap2(call)}
+		case chanMakeArg:
+			return []reflect.Value{sc.evalBuiltinMakeChan2(call)}
+		}
+		sc.err("unknown makeArgType %d", argtype)
+		return nil // unreachable
+	case 3:
+		if argtype != sliceMakeArg {
+			sc.err("bogus argument type %v for 3-form slice make", argtype)
+			return nil // unreachable
+		}
+		return []reflect.Value{sc.evalBuiltinMakeSlice3(call)}
 	default:
 		sc.err("%d arguments to make", len(call.Args))
 		return nil // unreachable
 	}
 }
 
-// evalBuiltinMakeMap1 evaluates m := make(map[K]V) or m := make(T).
+type makeArgType int
+
+const (
+	invalidMakeArg makeArgType = iota
+	sliceMakeArg
+	mapMakeArg
+	chanMakeArg
+)
+
+func underlyingType(typ types.Type) types.Type {
+	var t types.Type
+	for t != typ {
+		t = typ.Underlying()
+	}
+	return t
+}
+
+// evalBuiltinMakeSlice2 evaluates make([]T, 11) or make(SliceType, 12)
+func (sc *scope) evalBuiltinMakeSlice2(call *ast.CallExpr) reflect.Value {
+	typ := sc.dynamicType(sc.typeinfo.Types[call.Args[0]].Type)
+	size := sc.evalExpr(call.Args[1])[0].Int()
+	return reflect.MakeSlice(typ, int(size), int(size))
+}
+
+// evalBuiltinMakeSlice3 evaluates make([]T, 11) or make(SliceType, 12)
+func (sc *scope) evalBuiltinMakeSlice3(call *ast.CallExpr) reflect.Value {
+	typ := sc.dynamicType(sc.typeinfo.Types[call.Args[0]].Type)
+	size := sc.evalExpr(call.Args[1])[0].Int()
+	capacity := sc.evalExpr(call.Args[2])[0].Int()
+	return reflect.MakeSlice(typ, int(size), int(capacity))
+}
+
+// evalBuiltinMakeMap1 evaluates make(map[K]V) or make(MapType).
 func (sc *scope) evalBuiltinMakeMap1(call *ast.CallExpr) reflect.Value {
 	typ := sc.dynamicType(sc.typeinfo.Types[call.Args[0]].Type)
 	return reflect.MakeMap(typ)
 }
 
-// evalBuiltinMakeMap2 evaluates m := make(map[K]V, 23) or m := make(T, 42).
+// evalBuiltinMakeMap2 evaluates make(map[K]V, 23) or make(MapType, 42).
 func (sc *scope) evalBuiltinMakeMap2(call *ast.CallExpr) reflect.Value {
 	typ := sc.dynamicType(sc.typeinfo.Types[call.Args[0]].Type)
 	size := sc.evalExpr(call.Args[1])[0].Int()
@@ -425,6 +513,19 @@ func (sc *scope) evalBuiltinDelete(call *ast.CallExpr) {
 	m := sc.evalExpr(call.Args[0])[0]
 	k := sc.evalExpr(call.Args[1])[0]
 	m.SetMapIndex(k, reflect.Value{})
+}
+
+// evalBuiltinMakeChan1 evaluates make(chan T) or make(ChanType).
+func (sc *scope) evalBuiltinMakeChan1(call *ast.CallExpr) reflect.Value {
+	typ := sc.dynamicType(sc.typeinfo.Types[call.Args[0]].Type)
+	return reflect.MakeChan(typ, 0)
+}
+
+// evalBuiltinMakeChan2 evaluates make(chan T, 10) or make(ChanType, 20).
+func (sc *scope) evalBuiltinMakeChan2(call *ast.CallExpr) reflect.Value {
+	typ := sc.dynamicType(sc.typeinfo.Types[call.Args[0]].Type)
+	bufsize := sc.evalExpr(call.Args[1])[0].Int()
+	return reflect.MakeChan(typ, int(bufsize))
 }
 
 // evalIndexExpr evalueates b[0], s[x] = y and s["foo"] = 42.
@@ -501,16 +602,23 @@ func (sc *scope) evalBasicLit(lit *ast.BasicLit) reflect.Value {
 }
 
 // evalUnaryExpr evaluates a unary expression.
-func (sc *scope) evalUnaryExpr(ue *ast.UnaryExpr) reflect.Value {
+func (sc *scope) evalUnaryExpr(ue *ast.UnaryExpr) []reflect.Value {
 	switch ue.Op {
 	case token.AND:
 		val := sc.evalExpr(ue.X)[0]
 		ptr := reflect.New(val.Type())
 		ptr.Elem().Set(val)
-		return ptr
+		return []reflect.Value{ptr}
+	case token.ARROW:
+		val := sc.evalExpr(ue.X)[0]
+		v, ok := val.Recv()
+		if !ok {
+			v = reflect.Zero(val.Type().Elem())
+		}
+		return []reflect.Value{v}
 	default:
 		sc.err("cannot handle %v operand in unary expression", ue.Op)
-		return reflect.Value{} // unreachable
+		return nil // unreachable
 	}
 }
 
