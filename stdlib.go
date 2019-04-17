@@ -31,6 +31,7 @@ var stdlib = map[string]pkg{
 		Func: map[string]reflect.Value{
 			"Println": reflect.ValueOf(fmt.Println),
 			"Printf":  reflect.ValueOf(fmt.Printf),
+			"Sprintf": reflect.ValueOf(fmt.Sprintf),
 		},
 	},
 	"time": {

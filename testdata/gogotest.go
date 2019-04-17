@@ -37,6 +37,10 @@ type Foo struct {
 	Y string
 }
 
+func (f Foo) Bar() string {
+	return fmt.Sprintf("%d, %s", f.X, f.Y)
+}
+
 func main() {
 	fmt.Printf("the answer at %v is %v\n", time.Now(), typedAnswer)
 	fmt.Printf("%d squared is %d\n", 5, square(5))
@@ -55,4 +59,7 @@ func main() {
 	fmt.Printf("keyed struct literal: %#v\n", Foo{X: 42, Y: "test1"})
 	fmt.Printf("unkeyed struct literal: %#v\n", Foo{23, "test2"})
 	fmt.Printf("address of struct literal: %#v\n", &Foo{X: 22})
+
+	f := Foo{X: 1, Y: "test3"}
+	fmt.Printf("method call: %s\n", f.Bar())
 }

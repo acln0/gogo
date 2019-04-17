@@ -170,6 +170,8 @@ func (sc *scope) evalExpr(expr ast.Expr) []reflect.Value {
 		return []reflect.Value{sc.evalCompositeLit(e)}
 	case *ast.KeyValueExpr:
 		return sc.evalExpr(e.Value)
+	case *ast.SelectorExpr:
+		return sc.evalSelectorExpr(e)
 	}
 	sc.err("cannot handle %T expression", expr)
 	return nil // unreachable
@@ -217,9 +219,12 @@ func (sc *scope) evalAssign(a *ast.AssignStmt) {
 // evalCallExpr evaluates a call expression.
 func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 	var (
+		recv reflect.Value
 		fn   reflect.Value
 		args []reflect.Value
 	)
+
+	method := false
 
 	switch fexpr := call.Fun.(type) {
 	case *ast.Ident:
@@ -230,19 +235,25 @@ func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 		switch x := fexpr.X.(type) {
 		case *ast.Ident:
 			if x.Obj == nil {
-				if f, ok := sc.lookupFunc(x.Name); ok {
-					fn = f
-				}
 				if f, ok := sc.std[x.Name].Func[fexpr.Sel.Name]; ok {
 					// stdlib
 					fn = f
 				}
+			} else {
+				method = true
+				recv, _ = sc.lookupValue(x.Name)
+				methodname := fmt.Sprintf("%s.%s", "Foo", fexpr.Sel.Name)
+				fn, _ = sc.lookupFunc(methodname)
 			}
 		default:
 			sc.err("cannot handle selector of type %T", fexpr.X)
 		}
 	default:
 		sc.err("cannot handle function expression of type %T", call.Fun)
+	}
+
+	if method {
+		args = append(args, recv)
 	}
 
 	for _, arg := range call.Args {
@@ -370,6 +381,22 @@ func (sc *scope) evalCompositeLit(cl *ast.CompositeLit) reflect.Value {
 	return val.Elem()
 }
 
+// evalSelectorExpr evaluates a selector expression.
+func (sc *scope) evalSelectorExpr(se *ast.SelectorExpr) []reflect.Value {
+	val := sc.evalExpr(se.X)[0]
+
+	var values []reflect.Value
+
+	switch kind := val.Kind(); kind {
+	case reflect.Struct:
+		values = append(values, val.FieldByName(se.Sel.Name))
+	default:
+		sc.err("cannot handle selector on value of kind %v", kind)
+	}
+
+	return values
+}
+
 // evalFuncDecl evaluates a function declaration.
 func (sc *scope) evalFuncDecl(fd *ast.FuncDecl) {
 	var (
@@ -446,7 +473,19 @@ func (sc *scope) evalFuncDecl(fd *ast.FuncDecl) {
 	variadic := false // TODO(acln): fix
 	ftype := reflect.FuncOf(argtypes, returntypes, variadic)
 
-	sc.funcs[fd.Name.Name] = reflect.MakeFunc(ftype, fn)
+	var name string
+	if recvfield == nil {
+		name = fd.Name.Name
+	} else {
+		switch tname := recvfield.Type.(type) {
+		case *ast.Ident:
+			name = fmt.Sprintf("%s.%s", tname.Name, fd.Name.Name)
+		default:
+			sc.err("cannot handle %T expression in receiver type", recvfield.Type)
+		}
+	}
+
+	sc.funcs[name] = reflect.MakeFunc(ftype, fn)
 }
 
 // evalGenDecl evaluates a declaration.
