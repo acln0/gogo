@@ -77,7 +77,7 @@ func Exec(srcfile string) (err error) {
 	for _, decl := range f.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
-			pkgscope.evalFuncDecl(d)
+			pkgscope.evalFuncDecl(d.Recv, d.Name, d.Type, d.Body)
 		case *ast.GenDecl:
 			pkgscope.evalGenDecl(d)
 		}
@@ -156,6 +156,8 @@ func (sc *scope) eval(stmt ast.Stmt) []reflect.Value {
 	case *ast.AssignStmt:
 		sc.evalAssign(s)
 		return nil
+	case *ast.DeclStmt:
+		return sc.evalDecl(s)
 	default:
 		sc.err("cannot handle %T statement", stmt)
 		return nil // unreachable
@@ -181,6 +183,8 @@ func (sc *scope) evalExpr(expr ast.Expr) []reflect.Value {
 		return sc.evalExpr(e.Value)
 	case *ast.SelectorExpr:
 		return sc.evalSelectorExpr(e)
+	case *ast.FuncLit:
+		return []reflect.Value{sc.evalFuncLit(e)}
 	}
 	sc.err("cannot handle %T expression", expr)
 	return nil // unreachable
@@ -249,6 +253,12 @@ func (sc *scope) evalAssign(a *ast.AssignStmt) {
 			sc.err("cannot handle %T expression in assignment", lhsexpr)
 		}
 	}
+}
+
+// evalDecl evaluates a declaration.
+func (sc *scope) evalDecl(ds *ast.DeclStmt) []reflect.Value {
+	sc.evalGenDecl(ds.Decl.(*ast.GenDecl))
+	return nil
 }
 
 // evalCallExpr evaluates a call expression.
@@ -504,25 +514,35 @@ func (sc *scope) evalSelectorExpr(se *ast.SelectorExpr) []reflect.Value {
 	return values
 }
 
+// evalFuncLit evaluates a function literal expression.
+func (sc *scope) evalFuncLit(fl *ast.FuncLit) reflect.Value {
+	return sc.evalFuncDecl(nil, nil, fl.Type, fl.Body)
+}
+
 // evalFuncDecl evaluates a function declaration.
-func (sc *scope) evalFuncDecl(fd *ast.FuncDecl) {
+func (sc *scope) evalFuncDecl(recv *ast.FieldList, name *ast.Ident, ftype *ast.FuncType, body *ast.BlockStmt) reflect.Value {
 	var (
 		recvfield *ast.Field   // receiver, if any
 		fparams   []*ast.Field // formal parameters, if any
 		fresults  []*ast.Field // formal results, if any
 	)
-	if fd.Recv != nil {
-		recvfield = fd.Recv.List[0]
+	if recv != nil {
+		recvfield = recv.List[0]
 	}
-	if fd.Type.Params != nil {
-		fparams = fd.Type.Params.List
+	if ftype.Params != nil {
+		fparams = ftype.Params.List
 	}
-	if fd.Type.Results != nil {
-		fresults = fd.Type.Results.List
+	if ftype.Results != nil {
+		fresults = ftype.Results.List
 	}
 
 	fn := func(params []reflect.Value) []reflect.Value {
-		fnscope := sc.enter(fd.Name.Name)
+		var fnscope *scope
+		if name != nil {
+			fnscope = sc.enter(name.Name)
+		} else {
+			fnscope = sc.enter("")
+		}
 		if recvfield != nil {
 			name := recvfield.Names[0].Name
 			fnscope.values[name] = params[0]
@@ -543,7 +563,7 @@ func (sc *scope) evalFuncDecl(fd *ast.FuncDecl) {
 				fnscope.err("cannot handle named returns")
 			}
 		}
-		for _, stmt := range fd.Body.List {
+		for _, stmt := range body.List {
 			_, isReturn := stmt.(*ast.ReturnStmt)
 			values := fnscope.eval(stmt)
 			if isReturn {
@@ -578,18 +598,22 @@ func (sc *scope) evalFuncDecl(fd *ast.FuncDecl) {
 	}
 
 	variadic := false // TODO(acln): fix
-	ftype := reflect.FuncOf(argtypes, returntypes, variadic)
+	rftype := reflect.FuncOf(argtypes, returntypes, variadic)
+	rfn := reflect.MakeFunc(rftype, fn)
 
-	sc.funcs[sc.funcName(fd)] = reflect.MakeFunc(ftype, fn)
+	if name != nil {
+		sc.funcs[sc.funcName(name, recv)] = rfn
+	}
+	return rfn
 }
 
 // funcName returns the name of a function or method.
-func (sc *scope) funcName(fdecl *ast.FuncDecl) string {
-	if fdecl.Recv == nil {
-		return fdecl.Name.Name
+func (sc *scope) funcName(name *ast.Ident, recv *ast.FieldList) string {
+	if recv == nil {
+		return name.Name
 	}
-	rtype := fdecl.Recv.List[0].Type
-	return fmt.Sprintf("(%s).%s", sc.typeName(rtype), fdecl.Name.Name)
+	rtype := recv.List[0].Type
+	return fmt.Sprintf("(%s).%s", sc.typeName(rtype), name.Name)
 }
 
 // typeName returns the name of a type.
@@ -691,10 +715,13 @@ func (sc *scope) lookupConst(name string) (types.TypeAndValue, bool) {
 // lookupFunc looks up a runtime function value.
 func (sc *scope) lookupFunc(name string) (reflect.Value, bool) {
 	for sc != nil {
-		fn, ok := sc.funcs[name]
-		if ok {
+		if fn, ok := sc.funcs[name]; ok {
 			return fn, true
 		}
+		if fn, ok := sc.lookupValue(name); ok {
+			return fn, true
+		}
+
 		sc = sc.parent
 	}
 	return reflect.Value{}, false

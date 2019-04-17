@@ -5,32 +5,14 @@ import (
 	"time"
 )
 
+func packageLevelSum(x, y int) int {
+	return x + y
+}
+
 const (
 	alsoTheAnswer = answer
 	answer        = 42
 )
-
-type answerT int
-
-const (
-	typedAnswer answerT = alsoTheAnswer
-)
-
-func swap(x, y int) (int, int) {
-	return y, x
-}
-
-func sum(x, y int) int {
-	return x + y
-}
-
-func square(x int) int {
-	return x * x
-}
-
-func pair(z int) (int, int) {
-	return z, z
-}
 
 type Foo struct {
 	X int
@@ -57,11 +39,29 @@ func (q Quux) Whatever() string {
 	return q.Q + ", whatever"
 }
 
-type MultiLevel struct {
-	F Foo
-}
+func basics() {
+	type answerT int
 
-func main() {
+	const (
+		typedAnswer answerT = alsoTheAnswer
+	)
+
+	swap := func(x, y int) (int, int) {
+		return y, x
+	}
+
+	sum := func(x, y int) int {
+		return x + y
+	}
+
+	square := func(x int) int {
+		return x * x
+	}
+
+	pair := func(z int) (int, int) {
+		return z, z
+	}
+
 	fmt.Printf("the answer at %v is %v\n", time.Now(), typedAnswer)
 	fmt.Printf("%d squared is %d\n", 5, square(5))
 	fmt.Printf("%d + %d is %d\n", 3, 6, sum(3, 6))
@@ -80,6 +80,15 @@ func main() {
 	fmt.Printf("unkeyed struct literal: %#v\n", Foo{23, "test2"})
 	fmt.Printf("address of struct literal: %#v\n", &Foo{X: 22})
 
+	type MultiLevel struct {
+		F Foo
+	}
+
+	m := MultiLevel{F: Foo{X: 42}}
+	fmt.Printf("multilevel selector m.F.X: %v\n", m.F.X)
+}
+
+func methods() {
 	f := Foo{X: 1, Y: "test3"}
 	fmt.Printf("method call: %s\n", f.Bar())
 
@@ -95,7 +104,26 @@ func main() {
 
 	q := &Quux{Q: "it works"}
 	fmt.Printf("value call on pointer receiver: %s\n", q.Whatever())
-	
-	m := MultiLevel{F: Foo{X: 42}}
-	fmt.Printf("multilevel selector m.F.X: %v\n", m.F.X)
+}
+
+func main() {
+	fmt.Println("==== package level ====")
+	x := 1001
+	y := 1002
+	fmt.Printf("package level sum: %d + %d = %d\n", x, y, packageLevelSum(x, y))
+
+	hr()
+
+	fmt.Println("==== basics ====")
+	basics()
+	hr()
+
+	fmt.Println("==== methods ====")
+	methods()
+	hr()
+}
+
+func hr() {
+	fmt.Println("------------------")
+	fmt.Println("")
 }
