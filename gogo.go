@@ -19,8 +19,10 @@ import (
 	"fmt"
 	"go/ast"
 	"go/constant"
+	"go/importer"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"reflect"
 	"runtime"
 	"strconv"
@@ -34,6 +36,16 @@ func Exec(src string) (err error) {
 	if err != nil {
 		return err
 	}
+
+	tcfg := &types.Config{
+		Importer: importer.ForCompiler(fset, "gc", nil),
+		Error:    func(err error) { fmt.Println(err) },
+	}
+	p, err := tcfg.Check("main", fset, []*ast.File{f}, nil)
+	if err != nil {
+		return err
+	}
+	_ = p
 
 	sc := &scope{
 		std:              stdlib,
@@ -113,6 +125,9 @@ func (sc *scope) eval(stmt ast.Stmt) []reflect.Value {
 		return sc.evalExpr(s.X)
 	case *ast.ReturnStmt:
 		return sc.evalReturn(s)
+	case *ast.AssignStmt:
+		sc.evalAssign(s)
+		return nil
 	default:
 		sc.err("cannot handle %T statement", stmt)
 		return nil // unreachable
@@ -142,6 +157,36 @@ func (sc *scope) evalReturn(ret *ast.ReturnStmt) []reflect.Value {
 		values = append(values, sc.evalExpr(res)[0])
 	}
 	return values
+}
+
+// evalAssign evaluates an assignment statement.
+func (sc *scope) evalAssign(a *ast.AssignStmt) {
+	var values []reflect.Value
+	for _, rhsexpr := range a.Rhs {
+		values = append(values, sc.evalExpr(rhsexpr)...)
+	}
+
+	for idx, lhsexpr := range a.Lhs {
+		switch ident := lhsexpr.(type) {
+		case *ast.Ident:
+			switch a.Tok {
+			case token.DEFINE:
+				v, ok := sc.lookup(ident.Name)
+				if ok {
+					v.Set(values[idx])
+				} else {
+					sc.values[ident.Name] = values[idx]
+				}
+			case token.ASSIGN:
+				v, _ := sc.lookup(ident.Name)
+				v.Set(values[idx])
+			default:
+				sc.err("cannot handle %v token in assignment", a.Tok)
+			}
+		default:
+			sc.err("cannot handle %T expression in assignment", lhsexpr)
+		}
+	}
 }
 
 // evalCallExpr evaluates a call expression.
@@ -184,7 +229,7 @@ func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 
 // evalIdent evaluates an identifier.
 func (sc *scope) evalIdent(ident *ast.Ident) reflect.Value {
-	if v, ok := sc.values[ident.Name]; ok {
+	if v, ok := sc.lookup(ident.Name); ok {
 		return v
 	}
 
@@ -211,10 +256,14 @@ func (sc *scope) evalBasicLit(lit *ast.BasicLit) reflect.Value {
 	switch lit.Kind {
 	case token.INT:
 		val, _ := strconv.Atoi(lit.Value)
-		return reflect.ValueOf(val)
+		res := reflect.New(reflect.TypeOf(int(0)))
+		res.Elem().Set(reflect.ValueOf(val))
+		return res.Elem()
 	case token.STRING:
 		val, _ := strconv.Unquote(lit.Value)
-		return reflect.ValueOf(val)
+		res := reflect.New(reflect.TypeOf(""))
+		res.Elem().Set(reflect.ValueOf(val))
+		return res.Elem()
 	}
 
 	sc.err("cannot evaluate %v basic literal", lit.Kind)
@@ -417,6 +466,21 @@ func (sc *scope) evalTypeDecl(gd *ast.GenDecl) {
 // evalTypeSpec evaluates a type spec.
 func (sc *scope) evalTypeSpec(ts *ast.TypeSpec) {
 	sc.err("cannot evaluate type spec")
+}
+
+// lookup looks up a value. It starts from the current scope, and walks
+// the parent scopes if necessary. It returns a reflect.Value v such that
+// v.CanSet() == true. Returns reflect.Value{}, false if no such value exists.
+func (sc *scope) lookup(name string) (reflect.Value, bool) {
+	curr := sc
+	for curr != nil {
+		v, ok := curr.values[name]
+		if ok {
+			return v, true
+		}
+		curr = curr.parent
+	}
+	return reflect.Value{}, false
 }
 
 // resolveConsts resolves all unresolved constants.
