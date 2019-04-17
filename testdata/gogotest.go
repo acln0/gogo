@@ -133,6 +133,11 @@ func goroutines() {
 	}()
 	greeting := <-ch
 	fmt.Printf("the greeting is %s\n", greeting)
+
+	ch2 := make(chan int)
+	close(ch2)
+	v, ok := <-ch2
+	fmt.Printf("got %d, %t from closed channel\n", v, ok)
 }
 
 func main() {

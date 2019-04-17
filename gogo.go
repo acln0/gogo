@@ -180,7 +180,7 @@ func (sc *scope) evalExpr(expr ast.Expr) []reflect.Value {
 	case *ast.BasicLit:
 		return []reflect.Value{sc.evalBasicLit(e)}
 	case *ast.UnaryExpr:
-		return sc.evalUnaryExpr(e)
+		return sc.evalUnaryExpr(e, false)
 	case *ast.BinaryExpr:
 		return []reflect.Value{sc.evalBinaryExpr(e)}
 	case *ast.CompositeLit:
@@ -220,23 +220,25 @@ func (sc *scope) evalAssign(a *ast.AssignStmt) {
 		valuetypes []types.Type
 	)
 	for _, rhsexpr := range a.Rhs {
-		iexpr, ok := rhsexpr.(*ast.IndexExpr)
-		if ok && len(a.Lhs) > len(a.Rhs) {
-			vok := sc.evalIndexExpr(iexpr, reflect.Value{}, true)
-			for _, v := range vok {
-				values = append(values, v)
+		var rhsvalues []reflect.Value
 
-				var vtype types.Type
-				tt, ok := sc.typeinfo.Types[rhsexpr]
-				if ok {
-					vtype = tt.Type
-				}
-				valuetypes = append(valuetypes, vtype)
-			}
-			continue
+		iexpr, isIndexExpr := rhsexpr.(*ast.IndexExpr)
+		if isIndexExpr && len(a.Lhs) > len(a.Rhs) {
+			// v, ok := m[k]
+			rhsvalues = sc.evalIndexExpr(iexpr, reflect.Value{}, true)
 		}
 
-		for _, v := range sc.evalExpr(rhsexpr) {
+		uexpr, isUnaryExpr := rhsexpr.(*ast.UnaryExpr)
+		if isUnaryExpr && uexpr.Op == token.ARROW && len(a.Lhs) > len(a.Rhs) {
+			// v, ok := <-ch
+			rhsvalues = sc.evalUnaryExpr(uexpr, true)
+		}
+
+		if rhsvalues == nil {
+			rhsvalues = sc.evalExpr(rhsexpr)
+		}
+
+		for _, v := range rhsvalues {
 			values = append(values, v)
 
 			var vtype types.Type
@@ -322,6 +324,9 @@ func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 			return sc.evalBuiltinMake(call)
 		case "delete":
 			sc.evalBuiltinDelete(call)
+			return nil
+		case "close":
+			sc.evalBuiltinClose(call)
 			return nil
 		}
 	case *ast.SelectorExpr:
@@ -528,6 +533,12 @@ func (sc *scope) evalBuiltinMakeChan2(call *ast.CallExpr) reflect.Value {
 	return reflect.MakeChan(typ, int(bufsize))
 }
 
+// evalBuiltinClose evaluates close(ch).
+func (sc *scope) evalBuiltinClose(call *ast.CallExpr) {
+	ch := sc.evalExpr(call.Args[0])[0]
+	ch.Close()
+}
+
 // evalIndexExpr evalueates b[0], s[x] = y and s["foo"] = 42.
 func (sc *scope) evalIndexExpr(idx *ast.IndexExpr, val reflect.Value, okform bool) []reflect.Value {
 	lhstype := sc.typeinfo.Types[idx.X].Type
@@ -602,7 +613,7 @@ func (sc *scope) evalBasicLit(lit *ast.BasicLit) reflect.Value {
 }
 
 // evalUnaryExpr evaluates a unary expression.
-func (sc *scope) evalUnaryExpr(ue *ast.UnaryExpr) []reflect.Value {
+func (sc *scope) evalUnaryExpr(ue *ast.UnaryExpr, okformrecv bool) []reflect.Value {
 	switch ue.Op {
 	case token.AND:
 		val := sc.evalExpr(ue.X)[0]
@@ -614,6 +625,12 @@ func (sc *scope) evalUnaryExpr(ue *ast.UnaryExpr) []reflect.Value {
 		v, ok := val.Recv()
 		if !ok {
 			v = reflect.Zero(val.Type().Elem())
+		}
+		if okformrecv {
+			if ok {
+				return []reflect.Value{v, reflect.ValueOf(true)}
+			}
+			return []reflect.Value{v, reflect.ValueOf(false)}
 		}
 		return []reflect.Value{v}
 	default:
