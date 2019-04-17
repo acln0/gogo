@@ -186,7 +186,7 @@ func (sc *scope) evalExpr(expr ast.Expr) []reflect.Value {
 	case *ast.FuncLit:
 		return []reflect.Value{sc.evalFuncLit(e)}
 	case *ast.IndexExpr:
-		return sc.evalIndexExpr(e, reflect.Value{})
+		return sc.evalIndexExpr(e, reflect.Value{}, false)
 	}
 	sc.err("cannot handle %T expression", expr)
 	return nil // unreachable
@@ -214,6 +214,22 @@ func (sc *scope) evalAssign(a *ast.AssignStmt) {
 		valuetypes []types.Type
 	)
 	for _, rhsexpr := range a.Rhs {
+		iexpr, ok := rhsexpr.(*ast.IndexExpr)
+		if ok && len(a.Lhs) > len(a.Rhs) {
+			vok := sc.evalIndexExpr(iexpr, reflect.Value{}, true)
+			for _, v := range vok {
+				values = append(values, v)
+
+				var vtype types.Type
+				tt, ok := sc.typeinfo.Types[rhsexpr]
+				if ok {
+					vtype = tt.Type
+				}
+				valuetypes = append(valuetypes, vtype)
+			}
+			continue
+		}
+
 		for _, v := range sc.evalExpr(rhsexpr) {
 			values = append(values, v)
 
@@ -252,7 +268,7 @@ func (sc *scope) evalAssign(a *ast.AssignStmt) {
 			val := sc.evalExpr(lhsexpr)[0]
 			val.Set(values[idx])
 		case *ast.IndexExpr:
-			sc.evalIndexExpr(expr, values[idx])
+			sc.evalIndexExpr(expr, values[idx], false)
 		default:
 			sc.err("cannot handle %T expression in assignment", lhsexpr)
 		}
@@ -285,6 +301,9 @@ func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 		switch fexpr.Name {
 		case "make":
 			return sc.evalBuiltinMake(call)
+		case "delete":
+			sc.evalBuiltinDelete(call)
+			return nil
 		}
 	case *ast.SelectorExpr:
 		switch x := fexpr.X.(type) {
@@ -401,8 +420,15 @@ func (sc *scope) evalBuiltinMakeMap2(call *ast.CallExpr) reflect.Value {
 	return reflect.MakeMapWithSize(typ, int(size))
 }
 
+// evaluateBuiltinDelete evaluates delete(m, k).
+func (sc *scope) evalBuiltinDelete(call *ast.CallExpr) {
+	m := sc.evalExpr(call.Args[0])[0]
+	k := sc.evalExpr(call.Args[1])[0]
+	m.SetMapIndex(k, reflect.Value{})
+}
+
 // evalIndexExpr evalueates b[0], s[x] = y and s["foo"] = 42.
-func (sc *scope) evalIndexExpr(idx *ast.IndexExpr, val reflect.Value) []reflect.Value {
+func (sc *scope) evalIndexExpr(idx *ast.IndexExpr, val reflect.Value, okform bool) []reflect.Value {
 	lhstype := sc.typeinfo.Types[idx.X].Type
 
 	switch lhstype.(type) {
@@ -414,7 +440,15 @@ func (sc *scope) evalIndexExpr(idx *ast.IndexExpr, val reflect.Value) []reflect.
 			lhs.SetMapIndex(key, val)
 			return nil
 		}
-		return []reflect.Value{lhs.MapIndex(key)}
+		mval := lhs.MapIndex(key)
+		if mval == (reflect.Value{}) {
+			mval = reflect.Zero(lhs.Type().Key())
+		}
+		if okform {
+			ok := reflect.ValueOf(mval != reflect.Value{})
+			return []reflect.Value{mval, ok}
+		}
+		return []reflect.Value{mval}
 
 	default:
 		sc.err("cannot handle LHS expression of type %T in index expression", lhstype)

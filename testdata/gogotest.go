@@ -107,12 +107,27 @@ func methods() {
 }
 
 func maps() {
-	ms := make(map[string]string)
-	ms["test"] = "hello"
-	fmt.Printf("m[%q] = %q\n", "test", ms["test"])
+	m := make(map[string]string)
+	m["test"] = "hello"
+	fmt.Printf("m[%q] = %q\n", "test", m["test"])
+
+	val := m["bogus"]
+	fmt.Printf("m[%q] = %q\n", "bogus", val)
+
+	val, ok := m["bogus"]
+	fmt.Printf("m[%q] = %q, %t\n", "bogus", val, ok)
+
+	mcap := make(map[string]string, 2)
+	mcap["x"] = "y"
+	mcap["z"] = "t"
+	fmt.Printf("mcap: map with capacity: %v\n", mcap)
+
+	delete(mcap, "x")
+	fmt.Printf("after delete(mcap, %q): %v\n", "x", mcap)
 }
 
 func main() {
+/*
 	fmt.Println("==== package level ====")
 	x := 1001
 	y := 1002
@@ -128,6 +143,7 @@ func main() {
 	methods()
 	hr()
 
+*/
 	fmt.Println("==== maps ====")
 	maps()
 	hr()
