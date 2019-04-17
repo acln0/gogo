@@ -10,6 +10,12 @@ const (
 	answer        = 42
 )
 
+type answerT int
+
+const (
+	typedAnswer answerT = alsoTheAnswer
+)
+
 func swap(x, y int) (int, int) {
 	return y, x
 }
@@ -23,7 +29,7 @@ func square(x int) int {
 }
 
 func main() {
-	fmt.Printf("the answer at %v is %v\n", time.Now(), alsoTheAnswer)
+	fmt.Printf("the answer at %v is %v\n", time.Now(), typedAnswer)
 	fmt.Printf("%d squared is %d\n", 5, square(5))
 	fmt.Printf("%d + %d is %d\n", 3, 6, sum(3, 6))
 

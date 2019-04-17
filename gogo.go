@@ -65,6 +65,7 @@ func Exec(srcfile string) (err error) {
 		consts:   make(map[string]types.TypeAndValue),
 		funcs:    make(map[string]reflect.Value),
 		methods:  make(map[string]map[string]reflect.Value),
+		types:    make(map[string]reflect.Type),
 		typeinfo: info,
 	}
 
@@ -437,35 +438,29 @@ func (sc *scope) evalVarSpec(vspec *ast.ValueSpec) {
 	sc.err("cannot evaluate variable spec")
 }
 
-// evalImportDecl evaluates an import declaration.
+// evalImportDecl evaluates an import declaration. Only standard library
+// imports are supported for now.
 func (sc *scope) evalImportDecl(gd *ast.GenDecl) {
 	for _, spec := range gd.Specs {
-		sc.evalImportSpec(spec.(*ast.ImportSpec))
-	}
-}
+		i := spec.(*ast.ImportSpec)
+		path := strings.Trim(i.Path.Value, `"`)
+		stdpkg, ok := stdlib[path]
+		if !ok {
+			sc.err("non-stdlib import path %s", path)
+		}
 
-// evalImportSpec evaluates an import spec. Only standard library imports
-// are supported.
-func (sc *scope) evalImportSpec(i *ast.ImportSpec) {
-	path := strings.Trim(i.Path.Value, `"`)
-	stdpkg, ok := stdlib[path]
-	if !ok {
-		sc.err("non-stdlib import path %s", path)
+		sc.std[path] = stdpkg
 	}
-
-	sc.std[path] = stdpkg
 }
 
 // evalTypeDecl evaluates a type declaration.
 func (sc *scope) evalTypeDecl(gd *ast.GenDecl) {
 	for _, spec := range gd.Specs {
-		sc.evalTypeSpec(spec.(*ast.TypeSpec))
+		ts := spec.(*ast.TypeSpec)
+		name := ts.Name.Name
+		typ := sc.dynamicType(sc.typeinfo.Types[ts.Type].Type)
+		sc.types[name] = typ
 	}
-}
-
-// evalTypeSpec evaluates a type spec.
-func (sc *scope) evalTypeSpec(ts *ast.TypeSpec) {
-	sc.err("cannot evaluate type spec")
 }
 
 // lookup looks up a value. It starts from the current scope, and walks
