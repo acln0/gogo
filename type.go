@@ -15,14 +15,11 @@
 package gogo
 
 import (
-	"fmt"
 	"go/ast"
 	"go/types"
 	"reflect"
 	"unsafe"
 )
-
-var _ = fmt.Println
 
 var builtinType = map[string]reflect.Type{
 	"bool":          reflect.TypeOf(true),
@@ -73,66 +70,64 @@ func (sc *scope) fieldType(f *ast.Field) reflect.Type {
 	return sc.dynamicType(sc.typeinfo.Types[f.Type].Type)
 }
 
-func (sc *scope) namedType(name string) reflect.Type {
-	if named, ok := sc.types[name]; ok {
-		return named
-	}
-	if builtin, ok := builtinType[name]; ok {
-		return builtin
-	}
-
-	sc.err("unknown named type %s", name)
-	return nil // unreachable
-}
-
 func (sc *scope) dynamicType(typ types.Type) reflect.Type {
 	switch t := typ.(type) {
+	case *types.Array:
+		size := int(t.Len())
+		return reflect.ArrayOf(size, sc.dynamicType(t.Elem()))
+
+	case *types.Chan:
+		dir := reflectChanDir(t.Dir())
+		return reflect.ChanOf(dir, sc.dynamicType(t.Elem()))
+
 	case *types.Basic:
 		return builtinType[basicKind[t.Kind()]]
-	case *types.Struct:
-		return sc.dynamicStructType(typ.(*types.Struct))
+
+	case *types.Map:
+		ktype := sc.dynamicType(t.Key())
+		etype := sc.dynamicType(t.Elem())
+		return reflect.MapOf(ktype, etype)
+
 	case *types.Named:
 		return sc.dynamicType(t.Underlying())
+
 	case *types.Pointer:
 		return reflect.PtrTo(sc.dynamicType(t.Elem()))
+
+	case *types.Slice:
+		return reflect.SliceOf(sc.dynamicType(t.Elem()))
+
+	case *types.Struct:
+		var fields []reflect.StructField
+
+		for i := 0; i < t.NumFields(); i++ {
+			field := t.Field(i)
+			sf := reflect.StructField{
+				Name:      field.Name(),
+				Type:      sc.dynamicType(field.Type()),
+				Tag:       reflect.StructTag(t.Tag(i)),
+				Anonymous: field.Anonymous(),
+			}
+			fields = append(fields, sf)
+		}
+
+		return reflect.StructOf(fields)
+
 	default:
 		sc.err("cannot handle dynamic type of %T", typ)
 		return nil // unreachable
 	}
 }
 
-func (sc *scope) dynamicStructType(stype *types.Struct) reflect.Type {
-	var fields []reflect.StructField
-
-	for i := 0; i < stype.NumFields(); i++ {
-		field := stype.Field(i)
-		sf := reflect.StructField{
-			Name:      field.Name(),
-			Type:      sc.dynamicType(field.Type()),
-			Tag:       reflect.StructTag(stype.Tag(i)),
-			Anonymous: field.Anonymous(),
-		}
-		fields = append(fields, sf)
-	}
-
-	return reflect.StructOf(fields)
-}
-
-func (sc *scope) arrayType(at *ast.ArrayType) reflect.Type {
-	size := int(sc.evalExpr(at.Len)[0].Int())
-
-	var etype reflect.Type
-	switch texp := at.Elt.(type) {
-	case *ast.Ident:
-		etype = sc.namedType(texp.Name)
+func reflectChanDir(dir types.ChanDir) reflect.ChanDir {
+	switch dir {
+	case types.SendRecv:
+		return reflect.BothDir
+	case types.SendOnly:
+		return reflect.SendDir
+	case types.RecvOnly:
+		return reflect.RecvDir
 	default:
-		sc.err("cannot handle array element type %T", at.Elt)
+		return -1
 	}
-
-	return reflect.ArrayOf(size, etype)
-}
-
-func (sc *scope) structType(st *ast.StructType) reflect.Type {
-	sc.err("cannot handle struct types")
-	return nil // unreachable
 }

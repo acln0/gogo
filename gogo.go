@@ -52,14 +52,14 @@ func Exec(srcfile string) (err error) {
 		Selections: make(map[*ast.SelectorExpr]*types.Selection),
 		Scopes:     make(map[ast.Node]*types.Scope),
 	}
-	p, err := typecfg.Check("main", fset, []*ast.File{f}, info)
+	pkg, err := typecfg.Check("main", fset, []*ast.File{f}, info)
 	if err != nil {
 		return err
 	}
-	_ = p
 
 	pkgscope := newScope(nil)
 	pkgscope.typeinfo = info
+	pkgscope.pkg = pkg
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -123,6 +123,9 @@ type scope struct {
 
 	// typeinfo holds type information.
 	typeinfo *types.Info
+
+	// pkg holds the type checked package.
+	pkg *types.Package
 }
 
 func newScope(parent *scope) *scope {
@@ -138,6 +141,7 @@ func newScope(parent *scope) *scope {
 	}
 	if parent != nil {
 		sc.typeinfo = parent.typeinfo
+		sc.pkg = parent.pkg
 	}
 	return sc
 }
@@ -577,7 +581,6 @@ func (sc *scope) evalFuncDecl(fd *ast.FuncDecl) {
 	ftype := reflect.FuncOf(argtypes, returntypes, variadic)
 
 	sc.funcs[sc.funcName(fd)] = reflect.MakeFunc(ftype, fn)
-	fmt.Printf("evaluated %#v\n", sc.funcName(fd))
 }
 
 // funcName returns the name of a function or method.
@@ -652,7 +655,7 @@ func (sc *scope) evalImportDecl(gd *ast.GenDecl) {
 func (sc *scope) evalTypeDecl(gd *ast.GenDecl) {
 	for _, spec := range gd.Specs {
 		ts := spec.(*ast.TypeSpec)
-		name := ts.Name.Name
+		name := fmt.Sprintf("%s.%s", sc.pkg.Name(), ts.Name)
 		typ := sc.dynamicType(sc.typeinfo.Types[ts.Type].Type)
 		sc.types[name] = typ
 	}
