@@ -185,6 +185,8 @@ func (sc *scope) evalExpr(expr ast.Expr) []reflect.Value {
 		return sc.evalSelectorExpr(e)
 	case *ast.FuncLit:
 		return []reflect.Value{sc.evalFuncLit(e)}
+	case *ast.IndexExpr:
+		return sc.evalIndexExpr(e, reflect.Value{})
 	}
 	sc.err("cannot handle %T expression", expr)
 	return nil // unreachable
@@ -249,6 +251,8 @@ func (sc *scope) evalAssign(a *ast.AssignStmt) {
 		case *ast.SelectorExpr:
 			val := sc.evalExpr(lhsexpr)[0]
 			val.Set(values[idx])
+		case *ast.IndexExpr:
+			sc.evalIndexExpr(expr, values[idx])
 		default:
 			sc.err("cannot handle %T expression in assignment", lhsexpr)
 		}
@@ -276,6 +280,11 @@ func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 	case *ast.Ident:
 		if f, ok := sc.lookupFunc(fexpr.Name); ok {
 			fn = f
+			break
+		}
+		switch fexpr.Name {
+		case "make":
+			return sc.evalBuiltinMake(call)
 		}
 	case *ast.SelectorExpr:
 		switch x := fexpr.X.(type) {
@@ -364,6 +373,53 @@ func (sc *scope) lookupMethod(vtype types.Type, se *ast.SelectorExpr) (reflect.V
 	}
 
 	return reflect.Value{}, -1
+}
+
+// evalBuiltinMake calls the builtin make function.
+func (sc *scope) evalBuiltinMake(call *ast.CallExpr) []reflect.Value {
+	switch len(call.Args) {
+	case 1:
+		return []reflect.Value{sc.evalBuiltinMakeMap1(call)}
+	case 2:
+		return []reflect.Value{sc.evalBuiltinMakeMap2(call)}
+	default:
+		sc.err("%d arguments to make", len(call.Args))
+		return nil // unreachable
+	}
+}
+
+// evalBuiltinMakeMap1 evaluates m := make(map[K]V) or m := make(T).
+func (sc *scope) evalBuiltinMakeMap1(call *ast.CallExpr) reflect.Value {
+	typ := sc.dynamicType(sc.typeinfo.Types[call.Args[0]].Type)
+	return reflect.MakeMap(typ)
+}
+
+// evalBuiltinMakeMap2 evaluates m := make(map[K]V, 23) or m := make(T, 42).
+func (sc *scope) evalBuiltinMakeMap2(call *ast.CallExpr) reflect.Value {
+	typ := sc.dynamicType(sc.typeinfo.Types[call.Args[0]].Type)
+	size := sc.evalExpr(call.Args[1])[0].Int()
+	return reflect.MakeMapWithSize(typ, int(size))
+}
+
+// evalIndexExpr evalueates b[0], s[x] = y and s["foo"] = 42.
+func (sc *scope) evalIndexExpr(idx *ast.IndexExpr, val reflect.Value) []reflect.Value {
+	lhstype := sc.typeinfo.Types[idx.X].Type
+
+	switch lhstype.(type) {
+	case *types.Map:
+		lhs := sc.evalExpr(idx.X)[0]
+		key := sc.evalExpr(idx.Index)[0]
+
+		if val != (reflect.Value{}) {
+			lhs.SetMapIndex(key, val)
+			return nil
+		}
+		return []reflect.Value{lhs.MapIndex(key)}
+
+	default:
+		sc.err("cannot handle LHS expression of type %T in index expression", lhstype)
+		return nil // unreachable
+	}
 }
 
 // evalIdent evaluates an identifier.

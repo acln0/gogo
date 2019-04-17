@@ -106,6 +106,12 @@ func methods() {
 	fmt.Printf("value call on pointer receiver: %s\n", q.Whatever())
 }
 
+func maps() {
+	ms := make(map[string]string)
+	ms["test"] = "hello"
+	fmt.Printf("m[%q] = %q\n", "test", ms["test"])
+}
+
 func main() {
 	fmt.Println("==== package level ====")
 	x := 1001
@@ -120,6 +126,10 @@ func main() {
 
 	fmt.Println("==== methods ====")
 	methods()
+	hr()
+
+	fmt.Println("==== maps ====")
+	maps()
 	hr()
 }
 
