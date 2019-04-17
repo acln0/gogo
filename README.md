@@ -10,6 +10,7 @@ ever. I am writing it with the following objectives in mind:
 
 * gain a more profound understanding of the Go language itself
 * master the `reflect` package
+* learn how to use `go/ast`, `go/types` etc.
 * do a challenging exercise in tree traversal
 * have fun
 
