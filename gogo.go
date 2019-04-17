@@ -164,6 +164,10 @@ func (sc *scope) evalExpr(expr ast.Expr) []reflect.Value {
 		return []reflect.Value{sc.evalBasicLit(e)}
 	case *ast.BinaryExpr:
 		return []reflect.Value{sc.evalBinaryExpr(e)}
+	case *ast.CompositeLit:
+		return []reflect.Value{sc.evalCompositeLit(e)}
+	case *ast.KeyValueExpr:
+		return sc.evalExpr(e.Value)
 	}
 	sc.err("cannot handle %T expression", expr)
 	return nil // unreachable
@@ -323,6 +327,31 @@ func (sc *scope) evalIntAdd(x, y reflect.Value) reflect.Value {
 // evalIntMul evaluates x * y, where x and y are integers.
 func (sc *scope) evalIntMul(x, y reflect.Value) reflect.Value {
 	return reflect.ValueOf(x.Int() * y.Int())
+}
+
+// evalCompositeLit evaluates a composite literal expression.
+func (sc *scope) evalCompositeLit(cl *ast.CompositeLit) reflect.Value {
+	typ := sc.dynamicType(sc.typeinfo.Types[cl.Type].Type)
+	val := reflect.New(typ)
+
+	for idx, elt := range cl.Elts {
+		switch expr := elt.(type) {
+		case *ast.KeyValueExpr:
+			switch kexpr := expr.Key.(type) {
+			case *ast.Ident:
+				key := kexpr.Name
+				exprval := sc.evalExpr(expr.Value)[0]
+				val.Elem().FieldByName(key).Set(exprval)
+			default:
+				sc.err("cannot handle key expression of type %T in composite literal", expr.Key)
+			}
+
+		default:
+			val.Elem().Field(idx).Set(sc.evalExpr(elt)[0])
+		}
+	}
+
+	return val.Elem()
 }
 
 // evalFuncDecl evaluates a function declaration.

@@ -15,11 +15,14 @@
 package gogo
 
 import (
+	"fmt"
 	"go/ast"
 	"go/types"
 	"reflect"
 	"unsafe"
 )
+
+var _ = fmt.Println
 
 var builtinType = map[string]reflect.Type{
 	"bool":          reflect.TypeOf(true),
@@ -96,10 +99,31 @@ func (sc *scope) dynamicType(typ types.Type) reflect.Type {
 	switch t := typ.(type) {
 	case *types.Basic:
 		return builtinType[basicKind[t.Kind()]]
+	case *types.Struct:
+		return sc.dynamicStructType(typ.(*types.Struct))
+	case *types.Named:
+		return sc.dynamicType(t.Underlying())
 	default:
 		sc.err("cannot handle dynamic type of %T", typ)
 		return nil // unreachable
 	}
+}
+
+func (sc *scope) dynamicStructType(stype *types.Struct) reflect.Type {
+	var fields []reflect.StructField
+
+	for i := 0; i < stype.NumFields(); i++ {
+		field := stype.Field(i)
+		sf := reflect.StructField{
+			Name:      field.Name(),
+			Type:      sc.dynamicType(field.Type()),
+			Tag:       reflect.StructTag(stype.Tag(i)),
+			Anonymous: field.Anonymous(),
+		}
+		fields = append(fields, sf)
+	}
+
+	return reflect.StructOf(fields)
 }
 
 func (sc *scope) arrayType(at *ast.ArrayType) reflect.Type {

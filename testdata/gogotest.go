@@ -32,6 +32,11 @@ func pair(z int) (int, int) {
 	return z, z
 }
 
+type Foo struct {
+	X int
+	Y string
+}
+
 func main() {
 	fmt.Printf("the answer at %v is %v\n", time.Now(), typedAnswer)
 	fmt.Printf("%d squared is %d\n", 5, square(5))
@@ -46,4 +51,7 @@ func main() {
 	fmt.Printf("x = %d, y = %d\n", x, y)
 	xs, ys := swap(x, y)
 	fmt.Printf("swapped x and y: x = %d, y = %d\n", xs, ys)
+
+	fmt.Printf("printing a keyed struct literal: %#v\n", Foo{X: 42, Y: "test1"})
+	fmt.Printf("printing an unkeyed struct literal: %#v\n", Foo{23, "test2"})
 }
