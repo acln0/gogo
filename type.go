@@ -117,6 +117,11 @@ func (sc *scope) dynamicType(typ types.Type) reflect.Type {
 
 		return reflect.StructOf(fields)
 
+	case *types.Interface:
+		// !!!!!!!!
+		var x chan interface{}
+		return reflect.TypeOf(x).Elem()
+
 	default:
 		sc.err("cannot handle dynamic type of %T", typ)
 		return nil // unreachable

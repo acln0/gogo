@@ -61,18 +61,20 @@ func Exec(srcfile string) (err error) {
 	pkgscope.typeinfo = info
 	pkgscope.pkg = pkg
 
-	defer func() {
-		if r := recover(); r != nil {
-			e, ok := r.(error)
-			if !ok {
-				panic(r)
+	/*
+		defer func() {
+			if r := recover(); r != nil {
+				e, ok := r.(error)
+				if !ok {
+					panic(r)
+				}
+				if _, interp := e.(interpreterError); !interp {
+					panic(r)
+				}
+				err = e
 			}
-			if _, interp := e.(interpreterError); !interp {
-				panic(r)
-			}
-			err = e
-		}
-	}()
+		}()
+	*/
 
 	for _, decl := range f.Decls {
 		switch d := decl.(type) {
@@ -257,8 +259,8 @@ func (sc *scope) evalAssign(a *ast.AssignStmt) {
 		values[i] = copyval(values[i]) // don't break on x, y = y, x
 	}
 
-	for idx, lhsexpr := range a.Lhs {
-		switch expr := lhsexpr.(type) {
+	for idx, lexpr := range a.Lhs {
+		switch expr := lexpr.(type) {
 		case *ast.Ident:
 			switch a.Tok {
 			case token.DEFINE:
@@ -276,12 +278,52 @@ func (sc *scope) evalAssign(a *ast.AssignStmt) {
 				sc.err("cannot handle %v token in assignment", a.Tok)
 			}
 		case *ast.SelectorExpr:
-			val := sc.evalExpr(lhsexpr)[0]
+			val := sc.evalExpr(lexpr)[0]
 			val.Set(values[idx])
 		case *ast.IndexExpr:
 			sc.evalIndexExpr(expr, values[idx], false)
 		default:
-			sc.err("cannot handle %T expression in assignment", lhsexpr)
+			sc.err("cannot handle %T expression in assignment", lexpr)
+		}
+	}
+}
+
+// evalAssignRecv evaluates an assignment statement after a chosen receive
+// in a select statement.
+func (sc *scope) evalAssignRecv(as *ast.AssignStmt, val reflect.Value, ok bool) {
+	for i, lexpr := range as.Lhs {
+		var rhsval reflect.Value
+		if i == 0 {
+			rhsval = val
+		} else {
+			rhsval = reflect.ValueOf(ok)
+		}
+		switch expr := lexpr.(type) {
+		case *ast.Ident:
+			switch as.Tok {
+			case token.DEFINE:
+				v, ok := sc.lookupValue(expr.Name)
+				if ok {
+					v.Set(rhsval)
+				} else {
+					sc.values[expr.Name] = rhsval
+					rexpr := as.Rhs[0].(*ast.UnaryExpr).X
+					rtype := sc.typeinfo.Types[rexpr].Type
+					sc.valuetypes[expr.Name] = rtype
+				}
+			case token.ASSIGN:
+				v, _ := sc.lookupValue(expr.Name)
+				v.Set(rhsval)
+			default:
+				sc.err("cannot handle %v token in assignment", as.Tok)
+			}
+		case *ast.SelectorExpr:
+			val := sc.evalExpr(lexpr)[0]
+			val.Set(rhsval)
+		case *ast.IndexExpr:
+			sc.evalIndexExpr(expr, rhsval, false)
+		default:
+			sc.err("cannot handle %T expression in receive assignment", lexpr)
 		}
 	}
 }
@@ -308,12 +350,13 @@ func (sc *scope) evalSend(ss *ast.SendStmt) {
 // evalSelect evaluates a select statement.
 func (sc *scope) evalSelect(ss *ast.SelectStmt) {
 	var (
-		cases     []reflect.SelectCase
-		blocks    [][]ast.Stmt
-		onsuccess []func(reflect.Value, bool)
+		cases  []reflect.SelectCase
+		blocks [][]ast.Stmt
 	)
 
-	for _, blockstmt := range ss.Body.List {
+	onrecv := map[int]func(*scope, reflect.Value, bool){}
+
+	for index, blockstmt := range ss.Body.List {
 		var (
 			dir   reflect.SelectDir
 			chanv reflect.Value
@@ -337,7 +380,6 @@ func (sc *scope) evalSelect(ss *ast.SelectStmt) {
 			default:
 				sc.err("bogus %T expression in select", commstmt)
 			}
-			onsuccess = append(onsuccess, func(reflect.Value, bool) {})
 		case *ast.AssignStmt:
 			// v := <-ch or v, ok := <-ch or v, ok = ch
 			rhs := commstmt.Rhs[0]
@@ -353,15 +395,14 @@ func (sc *scope) evalSelect(ss *ast.SelectStmt) {
 			default:
 				sc.err("bogus %T expression in select", commstmt)
 			}
-			onsuccess = append(onsuccess, func(reflect.Value, bool) {
-				// TODO(acln): assign to variables in new scope
-			})
+			onrecv[index] = func(childsc *scope, val reflect.Value, ok bool) {
+				childsc.evalAssignRecv(commstmt, val, ok)
+			}
 		case *ast.SendStmt:
 			// ch <- val
 			dir = reflect.SelectSend
 			chanv = sc.evalExpr(commstmt.Chan)[0]
 			sendv = sc.evalExpr(commstmt.Value)[0]
-			onsuccess = append(onsuccess, func(reflect.Value, bool) {})
 		}
 
 		cases = append(cases, reflect.SelectCase{
@@ -374,10 +415,11 @@ func (sc *scope) evalSelect(ss *ast.SelectStmt) {
 
 	chosen, res, ok := reflect.Select(cases)
 
-	onsuccess[chosen](res, ok)
-
 	for _, stmt := range blocks[chosen] {
 		child := sc.enter("")
+		if fn := onrecv[chosen]; fn != nil {
+			fn(child, res, ok)
+		}
 		child.eval(stmt)
 	}
 }
@@ -690,11 +732,11 @@ func (sc *scope) evalIndexExpr(idx *ast.IndexExpr, val reflect.Value, okform boo
 
 // evalIdent evaluates an identifier.
 func (sc *scope) evalIdent(ident *ast.Ident) reflect.Value {
-	if v, ok := sc.lookupValue(ident.Name); ok {
+	if v, _ := sc.lookupValue(ident.Name); v != (reflect.Value{}) {
 		return v
 	}
 
-	if cv, ok := sc.lookupConst(ident.Name); ok {
+	if cv, _ := sc.lookupConst(ident.Name); cv != (types.TypeAndValue{}) {
 		val := cv.Value
 		switch val.Kind() {
 		case constant.Bool:
@@ -1025,30 +1067,41 @@ func (sc *scope) evalTypeDecl(gd *ast.GenDecl) {
 	}
 }
 
-// lookupValue looks up a value. It starts from the current scope, and walks
-// the parent scopes if necessary. It returns a reflect.Value v such that
-// v.CanSet() == true. Returns reflect.Value{}, false if no such value exists.
-func (sc *scope) lookupValue(name string) (reflect.Value, bool) {
-	for sc != nil {
+// lookupValue looks up a value. It starts from the current scope, and
+// walks the parent scopes if necessary. If the value is not found in the
+// current scope, lookupValue returns false. It returns a reflect.Value
+// v such that v.CanSet() == true. If no such value exists in any scope,
+// it returns reflect.Value{}.
+func (sc *scope) lookupValue(name string) (v reflect.Value, local bool) {
+	v, ok := sc.values[name]
+	if ok {
+		return v, true
+	}
+
+	for sc = sc.parent; sc != nil; sc = sc.parent {
 		v, ok := sc.values[name]
 		if ok {
-			return v, true
+			return v, false
 		}
-		sc = sc.parent
 	}
+
 	return reflect.Value{}, false
 }
 
-// lookupConst looks up a constant. It starts from the current scope, and walks
-// the parent scopes if necessary.
+// lookupConst looks up a constant. Analogous to lookupValue.
 func (sc *scope) lookupConst(name string) (types.TypeAndValue, bool) {
-	for sc != nil {
+	tv, ok := sc.consts[name]
+	if ok {
+		return tv, true
+	}
+
+	for sc = sc.parent; sc != nil; sc = sc.parent {
 		tv, ok := sc.consts[name]
 		if ok {
-			return tv, true
+			return tv, false
 		}
-		sc = sc.parent
 	}
+
 	return types.TypeAndValue{}, false
 }
 

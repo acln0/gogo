@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"time"
 )
@@ -142,12 +143,25 @@ func goroutines() {
 	neverreceives := make(chan float64)
 	neverclosed := make(chan int)
 	select {
-	case <-time.After(10 * 1000 * 1000): // TODO(acln): time.Millisecond
+	case <-time.After(1 * 1000 * 1000): // TODO(acln): time.Millisecond
 		fmt.Println("timeout")
 	case v := <-neverclosed:
-		fmt.Printf("bogus value %d\n", v)
+		fmt.Printf("bogus receive %d\n", v)
 	case neverreceives <- 42.0:
 		fmt.Println("bogus send")
+	}
+
+	result := make(chan error)
+	go func() {
+		time.Sleep(1 * 1000 * 1000) // TODO(acln): time.Millisecond
+		result <- errors.New("oops")
+	}()
+
+	select {
+	case <-time.After(3 * 1000 * 1000):
+		fmt.Println("timeout")
+	case res, ok := <-result:
+		fmt.Printf("got result %v, %t\n", res, ok)
 	}
 }
 

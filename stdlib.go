@@ -15,6 +15,7 @@
 package gogo
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"time"
@@ -27,6 +28,11 @@ type pkg struct {
 }
 
 var stdlib = map[string]pkg{
+	"errors": {
+		Func: map[string]reflect.Value{
+			"New": reflect.ValueOf(errors.New),
+		},
+	},
 	"fmt": {
 		Func: map[string]reflect.Value{
 			"Println": reflect.ValueOf(fmt.Println),
@@ -38,6 +44,7 @@ var stdlib = map[string]pkg{
 		Func: map[string]reflect.Value{
 			"After": reflect.ValueOf(time.After),
 			"Now":   reflect.ValueOf(time.Now),
+			"Sleep": reflect.ValueOf(time.Sleep),
 		},
 	},
 }
