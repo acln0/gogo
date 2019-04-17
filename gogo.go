@@ -23,25 +23,37 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"os"
 	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
 )
 
-// Exec executes the Go code specified by src.
-func Exec(src string) (err error) {
+// Exec executes the Go source file specified by srcfile.
+func Exec(srcfile string) (err error) {
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "gogosrc", src, 0)
+	src, err := os.Open(srcfile)
+	if err != nil {
+		return err
+	}
+	f, err := parser.ParseFile(fset, srcfile, src, 0)
 	if err != nil {
 		return err
 	}
 
-	tcfg := &types.Config{
+	typecfg := &types.Config{
 		Importer: importer.ForCompiler(fset, "gc", nil),
 		Error:    func(err error) { fmt.Println(err) },
 	}
-	p, err := tcfg.Check("main", fset, []*ast.File{f}, nil)
+	info := &types.Info{
+		Types:      make(map[ast.Expr]types.TypeAndValue),
+		Defs:       make(map[*ast.Ident]types.Object),
+		Implicits:  make(map[ast.Node]types.Object),
+		Selections: make(map[*ast.SelectorExpr]*types.Selection),
+		Scopes:     make(map[ast.Node]*types.Scope),
+	}
+	p, err := typecfg.Check("main", fset, []*ast.File{f}, info)
 	if err != nil {
 		return err
 	}
