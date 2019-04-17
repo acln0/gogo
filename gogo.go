@@ -60,12 +60,12 @@ func Exec(srcfile string) (err error) {
 	_ = p
 
 	sc := &scope{
-		std:              stdlib,
-		values:           make(map[string]reflect.Value),
-		consts:           make(map[string]constant.Value),
-		unresolvedConsts: make(map[string]string),
-		funcs:            make(map[string]reflect.Value),
-		methods:          make(map[string]map[string]reflect.Value),
+		std:      stdlib,
+		values:   make(map[string]reflect.Value),
+		consts:   make(map[string]types.TypeAndValue),
+		funcs:    make(map[string]reflect.Value),
+		methods:  make(map[string]map[string]reflect.Value),
+		typeinfo: info,
 	}
 
 	defer func() {
@@ -86,11 +86,9 @@ func Exec(srcfile string) (err error) {
 		case *ast.FuncDecl:
 			sc.evalFuncDecl(d)
 		case *ast.GenDecl:
-			sc.evalDecl(d)
+			sc.evalGenDecl(d)
 		}
 	}
-
-	sc.resolveConsts()
 
 	main, ok := sc.funcs["main"]
 	if !ok {
@@ -115,10 +113,7 @@ type scope struct {
 	values map[string]reflect.Value
 
 	// consts maps identifiers to constants.
-	consts map[string]constant.Value
-
-	// unresolvedConsts maps identifiers to unresolved const identifiers.
-	unresolvedConsts map[string]string
+	consts map[string]types.TypeAndValue
 
 	// funcs maps function names to runtime function values.
 	funcs map[string]reflect.Value
@@ -128,6 +123,9 @@ type scope struct {
 
 	// types maps type names to runtime types.
 	types map[string]reflect.Type
+
+	// typeinfo holds type information.
+	typeinfo *types.Info
 }
 
 // eval evaluates a statement.
@@ -246,16 +244,17 @@ func (sc *scope) evalIdent(ident *ast.Ident) reflect.Value {
 	}
 
 	if v, ok := sc.consts[ident.Name]; ok {
-		switch v.Kind() {
+		val := v.Value
+		switch val.Kind() {
 		case constant.Bool:
-			return reflect.ValueOf(constant.BoolVal(v))
+			return reflect.ValueOf(constant.BoolVal(val))
 		case constant.String:
-			return reflect.ValueOf(constant.StringVal(v))
+			return reflect.ValueOf(constant.StringVal(val))
 		case constant.Int:
-			val, _ := constant.Int64Val(v)
-			return reflect.ValueOf(val)
+			intval, _ := constant.Int64Val(val)
+			return reflect.ValueOf(intval)
 		default:
-			sc.err("cannot handle %v constant", v.String())
+			sc.err("cannot handle %v constant", val.String())
 		}
 	}
 
@@ -395,8 +394,8 @@ func (sc *scope) evalFuncDecl(fd *ast.FuncDecl) {
 	sc.funcs[fd.Name.Name] = reflect.MakeFunc(ftype, fn)
 }
 
-// evalDecl evaluates a declaration.
-func (sc *scope) evalDecl(gd *ast.GenDecl) {
+// evalGenDecl evaluates a declaration.
+func (sc *scope) evalGenDecl(gd *ast.GenDecl) {
 	switch gd.Tok {
 	case token.CONST:
 		sc.evalConstDecl(gd)
@@ -420,20 +419,9 @@ func (sc *scope) evalConstDecl(gd *ast.GenDecl) {
 
 // evalConstSpec evaluates a ValueSpec representing a constant declaration.
 func (sc *scope) evalConstSpec(vspec *ast.ValueSpec) {
-	if vspec.Type != nil {
-		sc.err("cannot handle typed consts")
-	}
 	for idx, name := range vspec.Names {
 		vexpr := vspec.Values[idx]
-		switch ve := vexpr.(type) {
-		case *ast.BasicLit:
-			cval := constant.MakeFromLiteral(ve.Value, ve.Kind, 0)
-			sc.consts[name.Name] = cval
-		case *ast.Ident:
-			sc.unresolvedConsts[name.Name] = ve.Name
-		default:
-			sc.err("cannot handle %T constant expressions", vexpr)
-		}
+		sc.consts[name.Name] = sc.typeinfo.Types[vexpr]
 	}
 }
 
@@ -493,23 +481,6 @@ func (sc *scope) lookup(name string) (reflect.Value, bool) {
 		curr = curr.parent
 	}
 	return reflect.Value{}, false
-}
-
-// resolveConsts resolves all unresolved constants.
-func (sc *scope) resolveConsts() {
-	for name, dep := range sc.unresolvedConsts {
-		for {
-			cval, resolved := sc.consts[dep]
-			if !resolved {
-				dep = sc.unresolvedConsts[dep]
-				continue
-			} else {
-				sc.consts[name] = cval
-				delete(sc.unresolvedConsts, name)
-				break
-			}
-		}
-	}
 }
 
 func (sc *scope) err(format string, args ...interface{}) {
