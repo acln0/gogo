@@ -25,7 +25,6 @@ import (
 	"go/types"
 	"os"
 	"reflect"
-	"runtime"
 	"strconv"
 	"strings"
 )
@@ -59,15 +58,8 @@ func Exec(srcfile string) (err error) {
 	}
 	_ = p
 
-	sc := &scope{
-		std:      stdlib,
-		values:   make(map[string]reflect.Value),
-		consts:   make(map[string]types.TypeAndValue),
-		funcs:    make(map[string]reflect.Value),
-		methods:  make(map[string]map[string]reflect.Value),
-		types:    make(map[string]reflect.Type),
-		typeinfo: info,
-	}
+	pkgscope := newScope(nil)
+	pkgscope.typeinfo = info
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -75,7 +67,7 @@ func Exec(srcfile string) (err error) {
 			if !ok {
 				panic(r)
 			}
-			if _, rok := e.(runtime.Error); rok {
+			if _, interp := e.(interpreterError); !interp {
 				panic(r)
 			}
 			err = e
@@ -85,13 +77,13 @@ func Exec(srcfile string) (err error) {
 	for _, decl := range f.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
-			sc.evalFuncDecl(d)
+			pkgscope.evalFuncDecl(d)
 		case *ast.GenDecl:
-			sc.evalGenDecl(d)
+			pkgscope.evalGenDecl(d)
 		}
 	}
 
-	main, ok := sc.funcs["main"]
+	main, ok := pkgscope.funcs["main"]
 	if !ok {
 		return errors.New("missing main function")
 	}
@@ -127,6 +119,22 @@ type scope struct {
 
 	// typeinfo holds type information.
 	typeinfo *types.Info
+}
+
+func newScope(parent *scope) *scope {
+	sc := &scope{
+		parent:  parent,
+		std:     stdlib,
+		values:  make(map[string]reflect.Value),
+		consts:  make(map[string]types.TypeAndValue),
+		funcs:   make(map[string]reflect.Value),
+		methods: make(map[string]map[string]reflect.Value),
+		types:   make(map[string]reflect.Type),
+	}
+	if parent != nil {
+		sc.typeinfo = parent.typeinfo
+	}
+	return sc
 }
 
 // eval evaluates a statement.
@@ -182,14 +190,14 @@ func (sc *scope) evalAssign(a *ast.AssignStmt) {
 		case *ast.Ident:
 			switch a.Tok {
 			case token.DEFINE:
-				v, ok := sc.lookup(ident.Name)
+				v, ok := sc.lookupValue(ident.Name)
 				if ok {
 					v.Set(values[idx])
 				} else {
 					sc.values[ident.Name] = values[idx]
 				}
 			case token.ASSIGN:
-				v, _ := sc.lookup(ident.Name)
+				v, _ := sc.lookupValue(ident.Name)
 				v.Set(values[idx])
 			default:
 				sc.err("cannot handle %v token in assignment", a.Tok)
@@ -209,14 +217,14 @@ func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 
 	switch fexpr := call.Fun.(type) {
 	case *ast.Ident:
-		if f, ok := sc.funcs[fexpr.Name]; ok {
+		if f, ok := sc.lookupFunc(fexpr.Name); ok {
 			fn = f
 		}
 	case *ast.SelectorExpr:
 		switch x := fexpr.X.(type) {
 		case *ast.Ident:
 			if x.Obj == nil {
-				if f, ok := sc.funcs[x.Name]; ok {
+				if f, ok := sc.lookupFunc(x.Name); ok {
 					fn = f
 				}
 				if f, ok := sc.std[x.Name].Func[fexpr.Sel.Name]; ok {
@@ -240,12 +248,12 @@ func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 
 // evalIdent evaluates an identifier.
 func (sc *scope) evalIdent(ident *ast.Ident) reflect.Value {
-	if v, ok := sc.lookup(ident.Name); ok {
+	if v, ok := sc.lookupValue(ident.Name); ok {
 		return v
 	}
 
-	if v, ok := sc.consts[ident.Name]; ok {
-		val := v.Value
+	if cv, ok := sc.lookupConst(ident.Name); ok {
+		val := cv.Value
 		switch val.Kind() {
 		case constant.Bool:
 			return reflect.ValueOf(constant.BoolVal(val))
@@ -335,29 +343,30 @@ func (sc *scope) evalFuncDecl(fd *ast.FuncDecl) {
 	}
 
 	fn := func(params []reflect.Value) []reflect.Value {
+		fnscope := sc.enter(fd.Name.Name)
 		if recvfield != nil {
 			name := recvfield.Names[0].Name
-			sc.values[name] = params[0]
-			defer delete(sc.values, name)
+			fnscope.values[name] = params[0]
+			defer delete(fnscope.values, name)
 			params = params[1:]
 		}
 		idx := 0
 		for _, fparam := range fparams {
 			for _, ident := range fparam.Names {
 				name := ident.Name
-				sc.values[name] = params[idx]
-				defer delete(sc.values, name)
+				fnscope.values[name] = params[idx]
+				defer delete(fnscope.values, name)
 				idx++
 			}
 		}
 		for _, fresult := range fresults {
 			if len(fresult.Names) != 0 {
-				sc.err("cannot handle named returns")
+				fnscope.err("cannot handle named returns")
 			}
 		}
 		for _, stmt := range fd.Body.List {
 			_, isReturn := stmt.(*ast.ReturnStmt)
-			values := sc.eval(stmt)
+			values := fnscope.eval(stmt)
 			if isReturn {
 				return values
 			}
@@ -459,21 +468,55 @@ func (sc *scope) evalTypeDecl(gd *ast.GenDecl) {
 	}
 }
 
-// lookup looks up a value. It starts from the current scope, and walks
+// lookupValue looks up a value. It starts from the current scope, and walks
 // the parent scopes if necessary. It returns a reflect.Value v such that
 // v.CanSet() == true. Returns reflect.Value{}, false if no such value exists.
-func (sc *scope) lookup(name string) (reflect.Value, bool) {
-	curr := sc
-	for curr != nil {
-		v, ok := curr.values[name]
+func (sc *scope) lookupValue(name string) (reflect.Value, bool) {
+	for sc != nil {
+		v, ok := sc.values[name]
 		if ok {
 			return v, true
 		}
-		curr = curr.parent
+		sc = sc.parent
 	}
 	return reflect.Value{}, false
 }
 
-func (sc *scope) err(format string, args ...interface{}) {
-	panic(fmt.Errorf(format, args...))
+// lookupConst looks up a constant. It starts from the current scope, and walks
+// the parent scopes if necessary.
+func (sc *scope) lookupConst(name string) (types.TypeAndValue, bool) {
+	for sc != nil {
+		tv, ok := sc.consts[name]
+		if ok {
+			return tv, true
+		}
+		sc = sc.parent
+	}
+	return types.TypeAndValue{}, false
 }
+
+// lookupFunc looks up a runtime function value.
+func (sc *scope) lookupFunc(name string) (reflect.Value, bool) {
+	for sc != nil {
+		fn, ok := sc.funcs[name]
+		if ok {
+			return fn, true
+		}
+		sc = sc.parent
+	}
+	return reflect.Value{}, false
+}
+
+// enter enters a new scope.
+func (sc *scope) enter(name string) *scope {
+	child := newScope(sc)
+	return child
+}
+
+func (sc *scope) err(format string, args ...interface{}) {
+	panic(interpreterError(fmt.Sprintf(format, args...)))
+}
+
+type interpreterError string
+
+func (e interpreterError) Error() string { return string(e) }
