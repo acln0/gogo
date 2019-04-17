@@ -28,10 +28,16 @@ func square(x int) int {
 	return x * x
 }
 
+func pair(z int) (int, int) {
+	return z, z
+}
+
 func main() {
 	fmt.Printf("the answer at %v is %v\n", time.Now(), typedAnswer)
 	fmt.Printf("%d squared is %d\n", 5, square(5))
 	fmt.Printf("%d + %d is %d\n", 3, 6, sum(3, 6))
+	fmt.Printf("printing a pair: ")
+	fmt.Println(pair(4))
 
 	x := 7
 	y := 8

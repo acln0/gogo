@@ -240,7 +240,7 @@ func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 	}
 
 	for _, arg := range call.Args {
-		args = append(args, sc.evalExpr(arg)[0])
+		args = append(args, sc.evalExpr(arg)...)
 	}
 
 	return fn.Call(args)
