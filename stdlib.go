@@ -36,7 +36,8 @@ var stdlib = map[string]pkg{
 	},
 	"time": {
 		Func: map[string]reflect.Value{
-			"Now": reflect.ValueOf(time.Now),
+			"After": reflect.ValueOf(time.After),
+			"Now":   reflect.ValueOf(time.Now),
 		},
 	},
 }

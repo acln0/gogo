@@ -164,6 +164,9 @@ func (sc *scope) eval(stmt ast.Stmt) []reflect.Value {
 	case *ast.SendStmt:
 		sc.evalSend(s)
 		return nil
+	case *ast.SelectStmt:
+		sc.evalSelect(s)
+		return nil
 	default:
 		sc.err("cannot handle %T statement", stmt)
 		return nil // unreachable
@@ -302,6 +305,83 @@ func (sc *scope) evalSend(ss *ast.SendStmt) {
 	chanv.Send(val)
 }
 
+// evalSelect evaluates a select statement.
+func (sc *scope) evalSelect(ss *ast.SelectStmt) {
+	var (
+		cases     []reflect.SelectCase
+		blocks    [][]ast.Stmt
+		onsuccess []func(reflect.Value, bool)
+	)
+
+	for _, blockstmt := range ss.Body.List {
+		var (
+			dir   reflect.SelectDir
+			chanv reflect.Value
+			sendv reflect.Value
+		)
+
+		commclause := blockstmt.(*ast.CommClause)
+
+		switch commstmt := commclause.Comm.(type) {
+		case *ast.ExprStmt:
+			// <-ch
+			switch expr := commstmt.X.(type) {
+			case *ast.UnaryExpr:
+				switch expr.Op {
+				case token.ARROW:
+					dir = reflect.SelectRecv
+					chanv = sc.evalExpr(expr.X)[0]
+				default:
+					sc.err("bogus unary op %v in expression statement in select", expr.Op)
+				}
+			default:
+				sc.err("bogus %T expression in select", commstmt)
+			}
+			onsuccess = append(onsuccess, func(reflect.Value, bool) {})
+		case *ast.AssignStmt:
+			// v := <-ch or v, ok := <-ch or v, ok = ch
+			rhs := commstmt.Rhs[0]
+			switch expr := rhs.(type) {
+			case *ast.UnaryExpr:
+				switch expr.Op {
+				case token.ARROW:
+					dir = reflect.SelectRecv
+					chanv = sc.evalExpr(expr.X)[0]
+				default:
+					sc.err("bogus unary op %v in expression statement in select", expr.Op)
+				}
+			default:
+				sc.err("bogus %T expression in select", commstmt)
+			}
+			onsuccess = append(onsuccess, func(reflect.Value, bool) {
+				// TODO(acln): assign to variables in new scope
+			})
+		case *ast.SendStmt:
+			// ch <- val
+			dir = reflect.SelectSend
+			chanv = sc.evalExpr(commstmt.Chan)[0]
+			sendv = sc.evalExpr(commstmt.Value)[0]
+			onsuccess = append(onsuccess, func(reflect.Value, bool) {})
+		}
+
+		cases = append(cases, reflect.SelectCase{
+			Dir:  dir,
+			Chan: chanv,
+			Send: sendv,
+		})
+		blocks = append(blocks, commclause.Body)
+	}
+
+	chosen, res, ok := reflect.Select(cases)
+
+	onsuccess[chosen](res, ok)
+
+	for _, stmt := range blocks[chosen] {
+		child := sc.enter("")
+		child.eval(stmt)
+	}
+}
+
 // evalCallExpr evaluates a call expression.
 func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 	var (
@@ -309,8 +389,10 @@ func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 		recvptr   reflect.Value
 		fn        reflect.Value
 		args      []reflect.Value
+		varargs   reflect.Value
 		method    bool
 		mcallMode methodCallMode
+		numargs   int
 	)
 
 	switch fexpr := call.Fun.(type) {
@@ -372,11 +454,49 @@ func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 		}
 	}
 
-	for _, arg := range call.Args {
-		args = append(args, sc.evalExpr(arg)...)
+	fntype := fn.Type()
+
+	if fntype.IsVariadic() {
+		numargs = fntype.NumIn() - 1
+		varargs = reflect.MakeSlice(fntype.In(numargs), 0, 0)
+	} else {
+		numargs = len(call.Args)
 	}
 
-	results := fn.Call(args)
+	processed := 0
+	for _, arg := range call.Args {
+		for _, argval := range sc.evalExpr(arg) {
+			idx := processed
+			if method {
+				idx++
+			}
+			if processed >= numargs {
+				intyp := fntype.In(fntype.NumIn() - 1).Elem()
+				if intyp.Kind() != reflect.Interface {
+					varargs = reflect.Append(varargs, argval.Convert(intyp))
+				} else {
+					varargs = reflect.Append(varargs, argval)
+				}
+			} else {
+				intyp := fntype.In(idx)
+				if intyp.Kind() != reflect.Interface {
+					args = append(args, argval.Convert(intyp))
+				} else {
+					args = append(args, argval)
+				}
+
+			}
+			processed++
+		}
+	}
+
+	var results []reflect.Value
+
+	if fn.Type().IsVariadic() {
+		results = fn.CallSlice(append(args, varargs))
+	} else {
+		results = fn.Call(args)
+	}
 
 	if method && mcallMode == takeRecvAddr {
 		recv.Set(recvptr.Elem())
@@ -487,14 +607,14 @@ func underlyingType(typ types.Type) types.Type {
 
 // evalBuiltinMakeSlice2 evaluates make([]T, 11) or make(SliceType, 12)
 func (sc *scope) evalBuiltinMakeSlice2(call *ast.CallExpr) reflect.Value {
-	typ := sc.dynamicType(sc.typeinfo.Types[call.Args[0]].Type)
+	typ := sc.typeOf(call.Args[0])
 	size := sc.evalExpr(call.Args[1])[0].Int()
 	return reflect.MakeSlice(typ, int(size), int(size))
 }
 
 // evalBuiltinMakeSlice3 evaluates make([]T, 11) or make(SliceType, 12)
 func (sc *scope) evalBuiltinMakeSlice3(call *ast.CallExpr) reflect.Value {
-	typ := sc.dynamicType(sc.typeinfo.Types[call.Args[0]].Type)
+	typ := sc.typeOf(call.Args[0])
 	size := sc.evalExpr(call.Args[1])[0].Int()
 	capacity := sc.evalExpr(call.Args[2])[0].Int()
 	return reflect.MakeSlice(typ, int(size), int(capacity))
@@ -502,13 +622,13 @@ func (sc *scope) evalBuiltinMakeSlice3(call *ast.CallExpr) reflect.Value {
 
 // evalBuiltinMakeMap1 evaluates make(map[K]V) or make(MapType).
 func (sc *scope) evalBuiltinMakeMap1(call *ast.CallExpr) reflect.Value {
-	typ := sc.dynamicType(sc.typeinfo.Types[call.Args[0]].Type)
+	typ := sc.typeOf(call.Args[0])
 	return reflect.MakeMap(typ)
 }
 
 // evalBuiltinMakeMap2 evaluates make(map[K]V, 23) or make(MapType, 42).
 func (sc *scope) evalBuiltinMakeMap2(call *ast.CallExpr) reflect.Value {
-	typ := sc.dynamicType(sc.typeinfo.Types[call.Args[0]].Type)
+	typ := sc.typeOf(call.Args[0])
 	size := sc.evalExpr(call.Args[1])[0].Int()
 	return reflect.MakeMapWithSize(typ, int(size))
 }
@@ -522,13 +642,13 @@ func (sc *scope) evalBuiltinDelete(call *ast.CallExpr) {
 
 // evalBuiltinMakeChan1 evaluates make(chan T) or make(ChanType).
 func (sc *scope) evalBuiltinMakeChan1(call *ast.CallExpr) reflect.Value {
-	typ := sc.dynamicType(sc.typeinfo.Types[call.Args[0]].Type)
+	typ := sc.typeOf(call.Args[0])
 	return reflect.MakeChan(typ, 0)
 }
 
 // evalBuiltinMakeChan2 evaluates make(chan T, 10) or make(ChanType, 20).
 func (sc *scope) evalBuiltinMakeChan2(call *ast.CallExpr) reflect.Value {
-	typ := sc.dynamicType(sc.typeinfo.Types[call.Args[0]].Type)
+	typ := sc.typeOf(call.Args[0])
 	bufsize := sc.evalExpr(call.Args[1])[0].Int()
 	return reflect.MakeChan(typ, int(bufsize))
 }
@@ -599,6 +719,11 @@ func (sc *scope) evalBasicLit(lit *ast.BasicLit) reflect.Value {
 	case token.INT:
 		val, _ := strconv.Atoi(lit.Value)
 		res := reflect.New(reflect.TypeOf(int(0)))
+		res.Elem().Set(reflect.ValueOf(val))
+		return res.Elem()
+	case token.FLOAT:
+		val, _ := strconv.ParseFloat(lit.Value, 64)
+		res := reflect.New(reflect.TypeOf(float64(0)))
 		res.Elem().Set(reflect.ValueOf(val))
 		return res.Elem()
 	case token.STRING:
@@ -686,7 +811,7 @@ func (sc *scope) evalStringAdd(x, y reflect.Value) reflect.Value {
 
 // evalCompositeLit evaluates a composite literal expression.
 func (sc *scope) evalCompositeLit(cl *ast.CompositeLit) reflect.Value {
-	typ := sc.dynamicType(sc.typeinfo.Types[cl.Type].Type)
+	typ := sc.typeOf(cl.Type)
 	val := reflect.New(typ)
 
 	for idx, elt := range cl.Elts {
@@ -895,7 +1020,7 @@ func (sc *scope) evalTypeDecl(gd *ast.GenDecl) {
 	for _, spec := range gd.Specs {
 		ts := spec.(*ast.TypeSpec)
 		name := fmt.Sprintf("%s.%s", sc.pkg.Name(), ts.Name)
-		typ := sc.dynamicType(sc.typeinfo.Types[ts.Type].Type)
+		typ := sc.typeOf(ts.Type)
 		sc.types[name] = typ
 	}
 }

@@ -138,6 +138,17 @@ func goroutines() {
 	close(ch2)
 	v, ok := <-ch2
 	fmt.Printf("got %d, %t from closed channel\n", v, ok)
+
+	neverreceives := make(chan float64)
+	neverclosed := make(chan int)
+	select {
+	case <-time.After(10 * 1000 * 1000): // TODO(acln): time.Millisecond
+		fmt.Println("timeout")
+	case v := <-neverclosed:
+		fmt.Printf("bogus value %d\n", v)
+	case neverreceives <- 42.0:
+		fmt.Println("bogus send")
+	}
 }
 
 func main() {

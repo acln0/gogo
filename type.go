@@ -67,7 +67,11 @@ var basicKind = map[types.BasicKind]string{
 }
 
 func (sc *scope) fieldType(f *ast.Field) reflect.Type {
-	return sc.dynamicType(sc.typeinfo.Types[f.Type].Type)
+	return sc.typeOf(f.Type)
+}
+
+func (sc *scope) typeOf(expr ast.Expr) reflect.Type {
+	return sc.dynamicType(sc.typeinfo.Types[expr].Type)
 }
 
 func (sc *scope) dynamicType(typ types.Type) reflect.Type {
