@@ -62,4 +62,9 @@ func main() {
 
 	f := Foo{X: 1, Y: "test3"}
 	fmt.Printf("method call: %s\n", f.Bar())
+
+	z, t, u := 54, 55, 56
+	fmt.Printf("local swap: %d %d %d => ", z, t, u)
+	z, t, u = t, u, z
+	fmt.Printf("%d, %d, %d\n", z, t, u)
 }

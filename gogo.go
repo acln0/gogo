@@ -186,11 +186,21 @@ func (sc *scope) evalReturn(ret *ast.ReturnStmt) []reflect.Value {
 	return values
 }
 
+func copyval(val reflect.Value) reflect.Value {
+	newval := reflect.New(val.Type())
+	newval.Elem().Set(val)
+	return newval.Elem()
+}
+
 // evalAssign evaluates an assignment statement.
 func (sc *scope) evalAssign(a *ast.AssignStmt) {
 	var values []reflect.Value
 	for _, rhsexpr := range a.Rhs {
 		values = append(values, sc.evalExpr(rhsexpr)...)
+	}
+
+	for i := 0; i < len(values); i++ {
+		values[i] = copyval(values[i]) // don't break on x, y = y, x
 	}
 
 	for idx, lhsexpr := range a.Lhs {
