@@ -414,15 +414,11 @@ func (sc *scope) evalGenDecl(gd *ast.GenDecl) {
 // evalConstDecl evaluates a constant declaration.
 func (sc *scope) evalConstDecl(gd *ast.GenDecl) {
 	for _, spec := range gd.Specs {
-		sc.evalConstSpec(spec.(*ast.ValueSpec))
-	}
-}
-
-// evalConstSpec evaluates a ValueSpec representing a constant declaration.
-func (sc *scope) evalConstSpec(vspec *ast.ValueSpec) {
-	for idx, name := range vspec.Names {
-		vexpr := vspec.Values[idx]
-		sc.consts[name.Name] = sc.typeinfo.Types[vexpr]
+		vspec := spec.(*ast.ValueSpec)
+		for idx, name := range vspec.Names {
+			vexpr := vspec.Values[idx]
+			sc.consts[name.Name] = sc.typeinfo.Types[vexpr]
+		}
 	}
 }
 
