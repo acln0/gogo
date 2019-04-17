@@ -41,6 +41,22 @@ func (f Foo) Bar() string {
 	return fmt.Sprintf("%d, %s", f.X, f.Y)
 }
 
+type Baz struct {
+	Z int
+}
+
+func (b *Baz) SetZ(z int) {
+	b.Z = z
+}
+
+type Quux struct {
+	Q string
+}
+
+func (q Quux) Whatever() string {
+	return q.Q + ", whatever"
+}
+
 func main() {
 	fmt.Printf("the answer at %v is %v\n", time.Now(), typedAnswer)
 	fmt.Printf("%d squared is %d\n", 5, square(5))
@@ -67,4 +83,12 @@ func main() {
 	fmt.Printf("local swap: %d %d %d => ", z, t, u)
 	z, t, u = t, u, z
 	fmt.Printf("%d, %d, %d\n", z, t, u)
+
+	b := Baz{Z: 0}
+	fmt.Printf("before SetZ(%d): %#v\n", 42, b)
+	b.SetZ(42)
+	fmt.Printf("after SetZ(%d): %#v\n", 42, b)
+
+	q := &Quux{Q: "it works"}
+	fmt.Printf("value call on pointer receiver: %s\n", q.Whatever())
 }

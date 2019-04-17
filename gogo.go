@@ -105,6 +105,10 @@ type scope struct {
 	// value maps identifiers to runtime values.
 	values map[string]reflect.Value
 
+	// valuetypes maps identifiers referring to values to their
+	// respective types.
+	valuetypes map[string]types.Type
+
 	// consts maps identifiers to constants.
 	consts map[string]types.TypeAndValue
 
@@ -123,13 +127,14 @@ type scope struct {
 
 func newScope(parent *scope) *scope {
 	sc := &scope{
-		parent:  parent,
-		std:     stdlib,
-		values:  make(map[string]reflect.Value),
-		consts:  make(map[string]types.TypeAndValue),
-		funcs:   make(map[string]reflect.Value),
-		methods: make(map[string]map[string]reflect.Value),
-		types:   make(map[string]reflect.Type),
+		parent:     parent,
+		std:        stdlib,
+		values:     make(map[string]reflect.Value),
+		valuetypes: make(map[string]types.Type),
+		consts:     make(map[string]types.TypeAndValue),
+		funcs:      make(map[string]reflect.Value),
+		methods:    make(map[string]map[string]reflect.Value),
+		types:      make(map[string]reflect.Type),
 	}
 	if parent != nil {
 		sc.typeinfo = parent.typeinfo
@@ -194,9 +199,21 @@ func copyval(val reflect.Value) reflect.Value {
 
 // evalAssign evaluates an assignment statement.
 func (sc *scope) evalAssign(a *ast.AssignStmt) {
-	var values []reflect.Value
+	var (
+		values     []reflect.Value
+		valuetypes []types.Type
+	)
 	for _, rhsexpr := range a.Rhs {
-		values = append(values, sc.evalExpr(rhsexpr)...)
+		for _, v := range sc.evalExpr(rhsexpr) {
+			values = append(values, v)
+
+			var vtype types.Type
+			tt, ok := sc.typeinfo.Types[rhsexpr]
+			if ok {
+				vtype = tt.Type
+			}
+			valuetypes = append(valuetypes, vtype)
+		}
 	}
 
 	for i := 0; i < len(values); i++ {
@@ -204,22 +221,26 @@ func (sc *scope) evalAssign(a *ast.AssignStmt) {
 	}
 
 	for idx, lhsexpr := range a.Lhs {
-		switch ident := lhsexpr.(type) {
+		switch expr := lhsexpr.(type) {
 		case *ast.Ident:
 			switch a.Tok {
 			case token.DEFINE:
-				v, ok := sc.lookupValue(ident.Name)
+				v, ok := sc.lookupValue(expr.Name)
 				if ok {
 					v.Set(values[idx])
 				} else {
-					sc.values[ident.Name] = values[idx]
+					sc.values[expr.Name] = values[idx]
+					sc.valuetypes[expr.Name] = valuetypes[idx]
 				}
 			case token.ASSIGN:
-				v, _ := sc.lookupValue(ident.Name)
+				v, _ := sc.lookupValue(expr.Name)
 				v.Set(values[idx])
 			default:
 				sc.err("cannot handle %v token in assignment", a.Tok)
 			}
+		case *ast.SelectorExpr:
+			val := sc.evalExpr(lhsexpr)[0]
+			val.Set(values[idx])
 		default:
 			sc.err("cannot handle %T expression in assignment", lhsexpr)
 		}
@@ -229,12 +250,13 @@ func (sc *scope) evalAssign(a *ast.AssignStmt) {
 // evalCallExpr evaluates a call expression.
 func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 	var (
-		recv reflect.Value
-		fn   reflect.Value
-		args []reflect.Value
+		recv      reflect.Value
+		recvptr   reflect.Value
+		fn        reflect.Value
+		args      []reflect.Value
+		method    bool
+		mcallMode methodCallMode
 	)
-
-	method := false
 
 	switch fexpr := call.Fun.(type) {
 	case *ast.Ident:
@@ -245,15 +267,15 @@ func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 		switch x := fexpr.X.(type) {
 		case *ast.Ident:
 			if x.Obj == nil {
+				// stdlib
 				if f, ok := sc.std[x.Name].Func[fexpr.Sel.Name]; ok {
-					// stdlib
 					fn = f
 				}
 			} else {
 				method = true
 				recv, _ = sc.lookupValue(x.Name)
-				methodname := fmt.Sprintf("%s.%s", "Foo", fexpr.Sel.Name)
-				fn, _ = sc.lookupFunc(methodname)
+				vtype, _ := sc.valuetypes[x.Name]
+				fn, mcallMode = sc.lookupMethod(vtype, fexpr)
 			}
 		default:
 			sc.err("cannot handle selector of type %T", fexpr.X)
@@ -262,15 +284,72 @@ func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 		sc.err("cannot handle function expression of type %T", call.Fun)
 	}
 
+	if fn == (reflect.Value{}) {
+		sc.err("no function found")
+		return nil // unreachable
+	}
+
 	if method {
-		args = append(args, recv)
+		switch mcallMode {
+		case takeRecvAddr:
+			recvptr = reflect.New(recv.Type())
+			recvptr.Elem().Set(recv)
+			args = append(args, recvptr)
+		case dereferenceRecv:
+			recv = recv.Elem()
+			args = append(args, recv)
+		default:
+			// do nothing
+			args = append(args, recv)
+		}
 	}
 
 	for _, arg := range call.Args {
 		args = append(args, sc.evalExpr(arg)...)
 	}
 
-	return fn.Call(args)
+	results := fn.Call(args)
+
+	if method && mcallMode == takeRecvAddr {
+		recv.Set(recvptr.Elem())
+	}
+
+	return results
+}
+
+type methodCallMode int
+
+const (
+	matchingType methodCallMode = iota
+	takeRecvAddr
+	dereferenceRecv
+)
+
+func (sc *scope) lookupMethod(vtype types.Type, se *ast.SelectorExpr) (reflect.Value, methodCallMode) {
+	// Try the matching type for the receiver first.
+	name := fmt.Sprintf("(%s).%s", vtype.String(), se.Sel.Name)
+	if m, ok := sc.lookupFunc(name); ok {
+		return m, matchingType
+	}
+
+	// Try the pointer type.
+	name = fmt.Sprintf("(*%s).%s", vtype.String(), se.Sel.Name)
+	if m, ok := sc.lookupFunc(name); ok {
+		return m, takeRecvAddr
+	}
+
+	// Try the value type, if the type is a pointer.
+	ptrtype, ok := vtype.(*types.Pointer)
+	if !ok {
+		return reflect.Value{}, -1
+	}
+	vtype = ptrtype.Elem()
+	name = fmt.Sprintf("(%s).%s", vtype.String(), se.Sel.Name)
+	if m, ok := sc.lookupFunc(name); ok {
+		return m, dereferenceRecv
+	}
+
+	return reflect.Value{}, -1
 }
 
 // evalIdent evaluates an identifier.
@@ -337,9 +416,14 @@ func (sc *scope) evalBinaryExpr(be *ast.BinaryExpr) reflect.Value {
 	case token.ADD:
 		x := sc.evalExpr(be.X)[0]
 		y := sc.evalExpr(be.Y)[0]
-		if x.Type().ConvertibleTo(builtinType["int64"]) {
+		switch {
+		case x.Type().ConvertibleTo(builtinType["int64"]):
 			res := reflect.New(x.Type())
 			res.Elem().SetInt(sc.evalIntAdd(x, y).Int())
+			return res.Elem()
+		case x.Type().ConvertibleTo(builtinType["string"]):
+			res := reflect.New(x.Type())
+			res.Elem().SetString(sc.evalStringAdd(x, y).String())
 			return res.Elem()
 		}
 	case token.MUL:
@@ -364,6 +448,11 @@ func (sc *scope) evalIntAdd(x, y reflect.Value) reflect.Value {
 // evalIntMul evaluates x * y, where x and y are integers.
 func (sc *scope) evalIntMul(x, y reflect.Value) reflect.Value {
 	return reflect.ValueOf(x.Int() * y.Int())
+}
+
+// evalStringAdd evaluates x + y, where x and y are strings.
+func (sc *scope) evalStringAdd(x, y reflect.Value) reflect.Value {
+	return reflect.ValueOf(x.String() + y.String())
 }
 
 // evalCompositeLit evaluates a composite literal expression.
@@ -396,6 +485,10 @@ func (sc *scope) evalSelectorExpr(se *ast.SelectorExpr) []reflect.Value {
 	val := sc.evalExpr(se.X)[0]
 
 	var values []reflect.Value
+
+	if val.Kind() == reflect.Ptr {
+		val = val.Elem()
+	}
 
 	switch kind := val.Kind(); kind {
 	case reflect.Struct:
@@ -483,19 +576,22 @@ func (sc *scope) evalFuncDecl(fd *ast.FuncDecl) {
 	variadic := false // TODO(acln): fix
 	ftype := reflect.FuncOf(argtypes, returntypes, variadic)
 
-	var name string
-	if recvfield == nil {
-		name = fd.Name.Name
-	} else {
-		switch tname := recvfield.Type.(type) {
-		case *ast.Ident:
-			name = fmt.Sprintf("%s.%s", tname.Name, fd.Name.Name)
-		default:
-			sc.err("cannot handle %T expression in receiver type", recvfield.Type)
-		}
-	}
+	sc.funcs[sc.funcName(fd)] = reflect.MakeFunc(ftype, fn)
+	fmt.Printf("evaluated %#v\n", sc.funcName(fd))
+}
 
-	sc.funcs[name] = reflect.MakeFunc(ftype, fn)
+// funcName returns the name of a function or method.
+func (sc *scope) funcName(fdecl *ast.FuncDecl) string {
+	if fdecl.Recv == nil {
+		return fdecl.Name.Name
+	}
+	rtype := fdecl.Recv.List[0].Type
+	return fmt.Sprintf("(%s).%s", sc.typeName(rtype), fdecl.Name.Name)
+}
+
+// typeName returns the name of a type.
+func (sc *scope) typeName(expr ast.Expr) string {
+	return sc.typeinfo.Types[expr].Type.String()
 }
 
 // evalGenDecl evaluates a declaration.

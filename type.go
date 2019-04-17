@@ -70,17 +70,7 @@ var basicKind = map[types.BasicKind]string{
 }
 
 func (sc *scope) fieldType(f *ast.Field) reflect.Type {
-	switch texp := f.Type.(type) {
-	case *ast.Ident:
-		return sc.namedType(texp.Name)
-	case *ast.ArrayType:
-		return sc.arrayType(texp)
-	case *ast.StructType:
-		return sc.structType(texp)
-	}
-
-	sc.err("cannot handle field of type %T", f.Type)
-	return nil
+	return sc.dynamicType(sc.typeinfo.Types[f.Type].Type)
 }
 
 func (sc *scope) namedType(name string) reflect.Type {
@@ -103,6 +93,8 @@ func (sc *scope) dynamicType(typ types.Type) reflect.Type {
 		return sc.dynamicStructType(typ.(*types.Struct))
 	case *types.Named:
 		return sc.dynamicType(t.Underlying())
+	case *types.Pointer:
+		return reflect.PtrTo(sc.dynamicType(t.Elem()))
 	default:
 		sc.err("cannot handle dynamic type of %T", typ)
 		return nil // unreachable
