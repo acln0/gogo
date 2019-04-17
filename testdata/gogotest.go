@@ -57,6 +57,10 @@ func (q Quux) Whatever() string {
 	return q.Q + ", whatever"
 }
 
+type MultiLevel struct {
+	F Foo
+}
+
 func main() {
 	fmt.Printf("the answer at %v is %v\n", time.Now(), typedAnswer)
 	fmt.Printf("%d squared is %d\n", 5, square(5))
@@ -91,4 +95,7 @@ func main() {
 
 	q := &Quux{Q: "it works"}
 	fmt.Printf("value call on pointer receiver: %s\n", q.Whatever())
+	
+	m := MultiLevel{F: Foo{X: 42}}
+	fmt.Printf("multilevel selector m.F.X: %v\n", m.F.X)
 }
