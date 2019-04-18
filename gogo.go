@@ -182,6 +182,9 @@ func (sc *scope) eval(stmt ast.Stmt) []reflect.Value {
 	case *ast.SwitchStmt:
 		sc.evalSwitch(s)
 		return nil
+	case *ast.RangeStmt:
+		sc.evalRange(s)
+		return nil
 	default:
 		sc.err("cannot handle %T statement", stmt)
 		return nil // unreachable
@@ -239,6 +242,7 @@ func (sc *scope) evalAssign(a *ast.AssignStmt) {
 		values     []reflect.Value
 		valuetypes []types.Type
 	)
+
 	for _, rhsexpr := range a.Rhs {
 		var rhsvalues []reflect.Value
 
@@ -289,6 +293,12 @@ func (sc *scope) evalAssign(a *ast.AssignStmt) {
 			case token.ASSIGN:
 				v, _ := sc.lookupValue(expr.Name)
 				v.Set(values[idx])
+			case token.ADD_ASSIGN:
+				v, _ := sc.lookupValue(expr.Name)
+				if v.Type().ConvertibleTo(builtinType["int64"]) {
+					res := v.Int() + values[idx].Int()
+					v.Set(reflect.ValueOf(res).Convert(v.Type()))
+				}
 			default:
 				sc.err("cannot handle %v token in assignment", a.Tok)
 			}
@@ -542,6 +552,97 @@ func (sc *scope) evalSwitch(ss *ast.SwitchStmt) {
 	}
 }
 
+// evalRange evaluates a Range statement.
+func (sc *scope) evalRange(rs *ast.RangeStmt) {
+	sc = sc.enter("")
+	switch sc.typeOf(rs.X).Kind() {
+	case reflect.Slice:
+		sc.evalRangeSlice(rs)
+	case reflect.Chan:
+		sc.evalRangeChan(rs)
+	default:
+		sc.err("cannot valuate %T expression in range", rs.X)
+	}
+}
+
+const underscore = "_"
+
+// evalRangeSlice evaluates a range over a slice.
+func (sc *scope) evalRangeSlice(rs *ast.RangeStmt) {
+	var (
+		key      reflect.Value
+		value    reflect.Value
+		setKey   bool
+		setValue bool
+	)
+
+	slicev := sc.evalExpr(rs.X)[0]
+
+	if rs.Key != nil {
+		switch keyexpr := rs.Key.(type) {
+		case *ast.Ident:
+			if keyexpr.Name == underscore {
+				break
+			}
+			setKey = true
+
+			switch rs.Tok {
+			case token.ASSIGN:
+				key = sc.evalExpr(keyexpr)[0]
+			case token.DEFINE:
+				keyptr := reflect.New(reflect.TypeOf(int(0)))
+				key = keyptr.Elem()
+				sc.values[keyexpr.Name] = key
+			default:
+				sc.err("bogus %v token in expression in range", rs.Tok)
+			}
+		default:
+			sc.err("cannot handle %T expression in range", keyexpr)
+		}
+	}
+	if rs.Value != nil {
+		switch valexpr := rs.Value.(type) {
+		case *ast.Ident:
+			if valexpr.Name == underscore {
+				break
+			}
+			setValue = true
+
+			switch rs.Tok {
+			case token.ASSIGN:
+				value = sc.evalExpr(valexpr)[0]
+			case token.DEFINE:
+				vtype := slicev.Type().Elem()
+				valptr := reflect.New(vtype)
+				value = valptr.Elem()
+				sc.values[valexpr.Name] = value
+			default:
+				sc.err("bogus %v token in expression in range", rs.Tok)
+			}
+		default:
+			sc.err("cannot handle %T expression in range", valexpr)
+		}
+	}
+
+	for i := 0; i < slicev.Len(); i++ {
+		if setKey {
+			key.Set(reflect.ValueOf(i))
+		}
+		if setValue {
+			value.Set(slicev.Index(i))
+		}
+
+		for _, stmt := range rs.Body.List {
+			sc.eval(stmt)
+		}
+	}
+}
+
+// evalRangeChan evaluates a range over a channel.
+func (sc *scope) evalRangeChan(rs *ast.RangeStmt) {
+	sc.err("cannot range over channels")
+}
+
 // evalCallExpr evaluates a call expression.
 func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 	var (
@@ -630,7 +731,11 @@ func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 	}
 
 	processed := 0
-	for _, arg := range call.Args {
+	for idx, arg := range call.Args {
+		if idx == len(call.Args)-1 && call.Ellipsis != token.NoPos {
+			varargs = reflect.AppendSlice(varargs, sc.evalExpr(arg)[0])
+			break
+		}
 		for _, argval := range sc.evalExpr(arg) {
 			idx := processed
 			if method {
@@ -1064,8 +1169,21 @@ func (sc *scope) evalStringAdd(x, y reflect.Value) reflect.Value {
 
 // evalCompositeLit evaluates a composite literal expression.
 func (sc *scope) evalCompositeLit(cl *ast.CompositeLit) reflect.Value {
-	typ := sc.typeOf(cl.Type)
-	val := reflect.New(typ)
+	switch kind := sc.typeOf(cl.Type).Kind(); kind {
+	case reflect.Struct:
+		return sc.evalCompositeStructLit(cl)
+	case reflect.Slice:
+		return sc.evalCompositeSliceLit(cl)
+	default:
+		sc.err("cannot handle composite literal of %v kind", kind)
+		return zeroval // unreachable
+	}
+
+}
+
+// evalCompositeStructLit evaluates a composite struct literal.
+func (sc *scope) evalCompositeStructLit(cl *ast.CompositeLit) reflect.Value {
+	val := reflect.New(sc.typeOf(cl.Type))
 
 	for idx, elt := range cl.Elts {
 		switch expr := elt.(type) {
@@ -1085,6 +1203,18 @@ func (sc *scope) evalCompositeLit(cl *ast.CompositeLit) reflect.Value {
 	}
 
 	return val.Elem()
+}
+
+// evalCompositeSliceLit evaluates a composite slice literal.
+func (sc *scope) evalCompositeSliceLit(cl *ast.CompositeLit) reflect.Value {
+	sliceval := reflect.MakeSlice(sc.typeOf(cl.Type), 0, len(cl.Elts))
+
+	for _, elemexpr := range cl.Elts {
+		elem := sc.evalExpr(elemexpr)[0]
+		sliceval = reflect.Append(sliceval, elem)
+	}
+
+	return sliceval
 }
 
 // evalSelectorExpr evaluates a selector expression.
@@ -1113,87 +1243,132 @@ func (sc *scope) evalFuncLit(fl *ast.FuncLit) reflect.Value {
 }
 
 // evalFuncDecl evaluates a function declaration.
+//
+// When evaluating a function (rather than a method), recv is nil. When
+// evaluating a function literal, name is nil. ftype and body must always
+// be non-nil.
+//
+// evalFuncDecl returns a reflect.Value representing the callable function.
 func (sc *scope) evalFuncDecl(recv *ast.FieldList, name *ast.Ident, ftype *ast.FuncType, body *ast.BlockStmt) reflect.Value {
 	var (
-		recvfield *ast.Field   // receiver, if any
-		fparams   []*ast.Field // formal parameters, if any
-		fresults  []*ast.Field // formal results, if any
+		recvfield    *ast.Field     // receiver
+		paramfields  []*ast.Field   // formal parameters
+		variadic     bool           // is the function variadic?
+		resultfields []*ast.Field   // formal results
+		paramtypes   []reflect.Type // runtime types of parameters
+		returntypes  []reflect.Type // runtime types of return values
 	)
+
+	// Determine the receiver, parameter, and result fields.
 	if recv != nil {
 		recvfield = recv.List[0]
 	}
 	if ftype.Params != nil {
-		fparams = ftype.Params.List
+		paramfields = ftype.Params.List
 	}
 	if ftype.Results != nil {
-		fresults = ftype.Results.List
+		resultfields = ftype.Results.List
 	}
 
+	// If there is a receiver, it is the first parameter to the function
+	// call. For example,
+	//
+	//     func (t T) Foo(x int, y string)
+	//
+	// has parameters (T, int, string) when called.
+	if recvfield != nil {
+		paramtypes = append(paramtypes, sc.typeOfField(recvfield))
+	}
+
+	// Next, determine the types of the parameters. Note that an
+	// *ast.Field can hold more than one parameter, as in
+	//
+	//     func(x, y int)
+	//
+	// Such a parameter list would be represented as a single *ast.Field,
+	// with two names. Not also that all parameters in an *ast.Field
+	// have the same type.
+	for _, paramf := range paramfields {
+		if _, ok := paramf.Type.(*ast.Ellipsis); ok {
+			variadic = true
+		}
+		ptype := sc.typeOfField(paramf)
+		for range paramf.Names {
+			paramtypes = append(paramtypes, ptype)
+		}
+	}
+
+	// Do likewise for return types, but note that return values may or
+	// may not be named.
+	for _, resultf := range resultfields {
+		rtype := sc.typeOfField(resultf)
+		n := len(resultf.Names)
+		if n == 0 {
+			n = 1
+		}
+		for i := 0; i < n; i++ {
+			returntypes = append(returntypes, rtype)
+		}
+	}
+
+	// Construct the runtime type of the function.
+	rftype := reflect.FuncOf(paramtypes, returntypes, variadic)
+
+	// Construct the body of the function.
 	fn := func(params []reflect.Value) []reflect.Value {
+		// The function call happens in a new scope.
 		var fnscope *scope
 		if name != nil {
 			fnscope = sc.enter(name.Name)
 		} else {
 			fnscope = sc.enter("")
 		}
+
+		// If this is a method call, add the receiver to the scope,
+		// and shift parameters forward by one.
 		if recvfield != nil {
-			name := recvfield.Names[0].Name
-			fnscope.values[name] = params[0]
-			defer delete(fnscope.values, name)
+			recvname := recvfield.Names[0].Name
+			fnscope.values[recvname] = params[0]
 			params = params[1:]
 		}
+
+		// Add function parameters to the scope of the call. See the
+		// note above about multiple parameters in an *ast.Field.
 		idx := 0
-		for _, fparam := range fparams {
-			for _, ident := range fparam.Names {
-				name := ident.Name
-				fnscope.values[name] = params[idx]
-				defer delete(fnscope.values, name)
+		for _, paramf := range paramfields {
+			for _, ident := range paramf.Names {
+				fnscope.values[ident.Name] = params[idx]
 				idx++
 			}
 		}
-		for _, fresult := range fresults {
+
+		// Add named result parameters to the scope of the call.
+		for _, fresult := range resultfields {
 			if len(fresult.Names) != 0 {
 				fnscope.err("cannot handle named returns")
 			}
 		}
+
+		// Now that all the identifiers have been added to the scope,
+		// evaluate the body of the function.
 		for _, stmt := range body.List {
+			// TODO(acln): improve this
 			_, isReturn := stmt.(*ast.ReturnStmt)
 			values := fnscope.eval(stmt)
 			if isReturn {
 				return values
 			}
 		}
-		// no return statement
+
+		// If we are here, there was no return statement, so there
+		// are no return values either.
 		return nil
 	}
 
-	var (
-		argtypes    []reflect.Type
-		returntypes []reflect.Type
-	)
-
-	if recvfield != nil {
-		argtypes = append(argtypes, sc.fieldType(recvfield))
-	}
-	for _, field := range fparams {
-		for range field.Names {
-			argtypes = append(argtypes, sc.fieldType(field))
-		}
-	}
-	for _, field := range fresults {
-		if len(field.Names) > 0 {
-			for range field.Names {
-				returntypes = append(returntypes, sc.fieldType(field))
-			}
-		} else {
-			returntypes = append(returntypes, sc.fieldType(field))
-		}
-	}
-
-	variadic := false // TODO(acln): fix
-	rftype := reflect.FuncOf(argtypes, returntypes, variadic)
+	// Finally, construct the function itself. If it is a named function,
+	// add it to the local scope. Also return the function, so it can
+	// be evaluated in a context like go func() { ... }().
 	rfn := reflect.MakeFunc(rftype, fn)
-
 	if name != nil {
 		sc.funcs[sc.funcName(name, recv)] = rfn
 	}
@@ -1394,7 +1569,7 @@ var basicKind = map[types.BasicKind]string{
 	types.UnsafePointer: "unsafepointer",
 }
 
-func (sc *scope) fieldType(f *ast.Field) reflect.Type {
+func (sc *scope) typeOfField(f *ast.Field) reflect.Type {
 	return sc.typeOf(f.Type)
 }
 
@@ -1408,12 +1583,17 @@ func (sc *scope) dynamicType(typ types.Type) reflect.Type {
 		size := int(t.Len())
 		return reflect.ArrayOf(size, sc.dynamicType(t.Elem()))
 
+	case *types.Basic:
+		return builtinType[basicKind[t.Kind()]]
+
 	case *types.Chan:
 		dir := reflectChanDir(t.Dir())
 		return reflect.ChanOf(dir, sc.dynamicType(t.Elem()))
 
-	case *types.Basic:
-		return builtinType[basicKind[t.Kind()]]
+	case *types.Interface:
+		// !!!!!!!!
+		var x chan interface{}
+		return reflect.TypeOf(x).Elem()
 
 	case *types.Map:
 		ktype := sc.dynamicType(t.Key())
@@ -1445,17 +1625,13 @@ func (sc *scope) dynamicType(typ types.Type) reflect.Type {
 
 		return reflect.StructOf(fields)
 
-	case *types.Interface:
-		// !!!!!!!!
-		var x chan interface{}
-		return reflect.TypeOf(x).Elem()
-
 	default:
 		sc.err("cannot handle dynamic type of %T", typ)
 		return nil // unreachable
 	}
 }
 
+// reflectChanDir translates a types.ChanDir to a reflect.ChanDir.
 func reflectChanDir(dir types.ChanDir) reflect.ChanDir {
 	switch dir {
 	case types.SendRecv:

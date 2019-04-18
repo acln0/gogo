@@ -215,6 +215,21 @@ func flowcontrol() {
 	}
 }
 
+func variadic() {
+	sum := func(values ...int) int {
+		res := 0
+		for _, val := range values {
+			res += val
+		}
+		return res
+	}
+
+	fmt.Printf("sum to 3 is %d\n", sum(1, 2, 3))
+
+	s := []int{1, 2, 3, 4, 5}
+	fmt.Printf("variadic sum to 5 is %d\n", sum(s...))
+}
+
 func main() {
 	fmt.Println("==== package level ====")
 	x := 1001
@@ -244,6 +259,10 @@ func main() {
 
 	fmt.Println("==== flow control ====")
 	flowcontrol()
+	hr()
+
+	fmt.Println("==== variadic ====")
+	variadic()
 	hr()
 }
 
