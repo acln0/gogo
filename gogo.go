@@ -210,7 +210,7 @@ func (sc *scope) evalExpr(expr ast.Expr) []reflect.Value {
 	case *ast.FuncLit:
 		return []reflect.Value{sc.evalFuncLit(e)}
 	case *ast.IndexExpr:
-		return sc.evalIndexExpr(e, reflect.Value{}, false)
+		return sc.evalIndexExpr(e, zeroval, false)
 	case *ast.SliceExpr:
 		return []reflect.Value{sc.evalSliceExpr(e)}
 	}
@@ -245,7 +245,7 @@ func (sc *scope) evalAssign(a *ast.AssignStmt) {
 		iexpr, isIndexExpr := rhsexpr.(*ast.IndexExpr)
 		if isIndexExpr && len(a.Lhs) > len(a.Rhs) {
 			// v, ok := m[k]
-			rhsvalues = sc.evalIndexExpr(iexpr, reflect.Value{}, true)
+			rhsvalues = sc.evalIndexExpr(iexpr, zeroval, true)
 		}
 
 		uexpr, isUnaryExpr := rhsexpr.(*ast.UnaryExpr)
@@ -520,7 +520,7 @@ func (sc *scope) evalSwitch(ss *ast.SwitchStmt) {
 			cases = append(cases, sc.evalExpr(expr)[0])
 		}
 
-		if tagval != (reflect.Value{}) {
+		if tagval != zeroval {
 			for _, c := range cases {
 				if tagval.Interface() == c.Interface() {
 					for _, stmt := range clause.Body {
@@ -600,7 +600,7 @@ func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 		sc.err("cannot handle function expression of type %T", call.Fun)
 	}
 
-	if fn == (reflect.Value{}) {
+	if fn == zeroval {
 		sc.err("no function found")
 		return nil // unreachable
 	}
@@ -695,7 +695,7 @@ func (sc *scope) lookupMethod(vtype types.Type, se *ast.SelectorExpr) (reflect.V
 	// Try the value type, if the type is a pointer.
 	ptrtype, ok := vtype.(*types.Pointer)
 	if !ok {
-		return reflect.Value{}, -1
+		return zeroval, -1
 	}
 	vtype = ptrtype.Elem()
 	name = fmt.Sprintf("(%s).%s", vtype.String(), se.Sel.Name)
@@ -703,7 +703,7 @@ func (sc *scope) lookupMethod(vtype types.Type, se *ast.SelectorExpr) (reflect.V
 		return m, dereferenceRecv
 	}
 
-	return reflect.Value{}, -1
+	return zeroval, -1
 }
 
 // evalBuiltinMake calls the builtin make function.
@@ -803,7 +803,7 @@ func (sc *scope) evalBuiltinMakeMap2(call *ast.CallExpr) reflect.Value {
 func (sc *scope) evalBuiltinDelete(call *ast.CallExpr) {
 	m := sc.evalExpr(call.Args[0])[0]
 	k := sc.evalExpr(call.Args[1])[0]
-	m.SetMapIndex(k, reflect.Value{})
+	m.SetMapIndex(k, zeroval)
 }
 
 // evalBuiltinMakeChan1 evaluates make(chan T) or make(ChanType).
@@ -864,16 +864,16 @@ func (sc *scope) evalIndexExpr(idx *ast.IndexExpr, val reflect.Value, okform boo
 		lhs := sc.evalExpr(idx.X)[0]
 		key := sc.evalExpr(idx.Index)[0]
 
-		if val != (reflect.Value{}) {
+		if val != zeroval {
 			lhs.SetMapIndex(key, val)
 			return nil
 		}
 		mval := lhs.MapIndex(key)
-		if mval == (reflect.Value{}) {
+		if mval == zeroval {
 			mval = reflect.Zero(lhs.Type().Key())
 		}
 		if okform {
-			ok := reflect.ValueOf(mval != reflect.Value{})
+			ok := reflect.ValueOf(mval != zeroval)
 			return []reflect.Value{mval, ok}
 		}
 		return []reflect.Value{mval}
@@ -881,7 +881,7 @@ func (sc *scope) evalIndexExpr(idx *ast.IndexExpr, val reflect.Value, okform boo
 		index := sc.evalExpr(idx.Index)[0].Int()
 		sval := sc.evalExpr(idx.X)[0].Index(int(index))
 
-		if val != (reflect.Value{}) {
+		if val != zeroval {
 			sval.Set(val)
 			return nil
 		}
@@ -933,7 +933,7 @@ func (sc *scope) evalSliceExpr(se *ast.SliceExpr) reflect.Value {
 
 // evalIdent evaluates an identifier.
 func (sc *scope) evalIdent(ident *ast.Ident) reflect.Value {
-	if v, _ := sc.lookupValue(ident.Name); v != (reflect.Value{}) {
+	if v, _ := sc.lookupValue(ident.Name); v != zeroval {
 		return v
 	}
 
@@ -953,7 +953,7 @@ func (sc *scope) evalIdent(ident *ast.Ident) reflect.Value {
 	}
 
 	sc.err("value for identifier %s not found", ident.Name)
-	return reflect.Value{} // unreachable
+	return zeroval // unreachable
 }
 
 // evalBasicLit evaluates a basic literal.
@@ -977,7 +977,7 @@ func (sc *scope) evalBasicLit(lit *ast.BasicLit) reflect.Value {
 	}
 
 	sc.err("cannot evaluate %v basic literal", lit.Kind)
-	return reflect.Value{} // unreachable
+	return zeroval // unreachable
 }
 
 // evalUnaryExpr evaluates a unary expression.
@@ -1044,7 +1044,7 @@ func (sc *scope) evalBinaryExpr(be *ast.BinaryExpr) reflect.Value {
 	}
 
 	sc.err("cannot evaluate binary expression of type %v", be.Op)
-	return reflect.Value{} // unreachable
+	return zeroval // unreachable
 }
 
 // evalIntAdd evaluates x + y, where x and y are integers.
@@ -1287,7 +1287,7 @@ func (sc *scope) evalTypeDecl(gd *ast.GenDecl) {
 // walks the parent scopes if necessary. If the value is not found in the
 // current scope, lookupValue returns false. It returns a reflect.Value
 // v such that v.CanSet() == true. If no such value exists in any scope,
-// it returns reflect.Value{}.
+// it returns zeroval.
 func (sc *scope) lookupValue(name string) (v reflect.Value, local bool) {
 	v, ok := sc.values[name]
 	if ok {
@@ -1301,7 +1301,7 @@ func (sc *scope) lookupValue(name string) (v reflect.Value, local bool) {
 		}
 	}
 
-	return reflect.Value{}, false
+	return zeroval, false
 }
 
 // lookupConst looks up a constant. Analogous to lookupValue.
@@ -1333,7 +1333,7 @@ func (sc *scope) lookupFunc(name string) (reflect.Value, bool) {
 
 		sc = sc.parent
 	}
-	return reflect.Value{}, false
+	return zeroval, false
 }
 
 // enter enters a new scope.
@@ -1469,3 +1469,5 @@ func reflectChanDir(dir types.ChanDir) reflect.ChanDir {
 		return -1
 	}
 }
+
+var zeroval = reflect.Value{}
