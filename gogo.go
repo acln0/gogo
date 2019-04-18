@@ -1355,7 +1355,6 @@ var builtinType = map[string]reflect.Type{
 	"byte":          reflect.TypeOf(byte(0)),
 	"complex128":    reflect.TypeOf(complex(float64(0), float64(0))),
 	"complex64":     reflect.TypeOf(complex(float32(0), float32(0))),
-	"error":         reflect.TypeOf((error)(nil)), // TODO(acln): fix
 	"float32":       reflect.TypeOf(float32(0)),
 	"float64":       reflect.TypeOf(float64(0)),
 	"int":           reflect.TypeOf(int(0)),
