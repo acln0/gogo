@@ -61,6 +61,7 @@ func Exec(srcfile string) (err error) {
 	pkgscope := newScope(nil)
 	pkgscope.typeinfo = info
 	pkgscope.pkg = pkg
+	pkgscope.fset = fset
 
 	/*
 		defer func() {
@@ -85,6 +86,9 @@ func Exec(srcfile string) (err error) {
 			pkgscope.evalGenDecl(d)
 		}
 	}
+
+	pkgscope.values["true"] = reflect.ValueOf(true)
+	pkgscope.values["false"] = reflect.ValueOf(false)
 
 	main, ok := pkgscope.funcs["main"]
 	if !ok {
@@ -129,6 +133,9 @@ type scope struct {
 
 	// pkg holds the type checked package.
 	pkg *types.Package
+
+	// fset holds the top level file set.
+	fset *token.FileSet
 }
 
 func newScope(parent *scope) *scope {
@@ -145,6 +152,7 @@ func newScope(parent *scope) *scope {
 	if parent != nil {
 		sc.typeinfo = parent.typeinfo
 		sc.pkg = parent.pkg
+		sc.fset = parent.fset
 	}
 	return sc
 }
@@ -153,7 +161,7 @@ func newScope(parent *scope) *scope {
 func (sc *scope) eval(stmt ast.Stmt) []reflect.Value {
 	switch s := stmt.(type) {
 	case *ast.ExprStmt:
-		return sc.evalExpr(s.X)
+		return sc.evalExpr(s.X, nil)
 	case *ast.ReturnStmt:
 		return sc.evalReturn(s)
 	case *ast.AssignStmt:
@@ -192,12 +200,12 @@ func (sc *scope) eval(stmt ast.Stmt) []reflect.Value {
 }
 
 // evalExpr evaluates an expression.
-func (sc *scope) evalExpr(expr ast.Expr) []reflect.Value {
+func (sc *scope) evalExpr(expr ast.Expr, typ reflect.Type) []reflect.Value {
 	switch e := expr.(type) {
 	case *ast.CallExpr:
 		return sc.evalCallExpr(e)
 	case *ast.Ident:
-		return []reflect.Value{sc.evalIdent(e)}
+		return []reflect.Value{sc.evalIdent(e, typ)}
 	case *ast.BasicLit:
 		return []reflect.Value{sc.evalBasicLit(e)}
 	case *ast.UnaryExpr:
@@ -207,7 +215,7 @@ func (sc *scope) evalExpr(expr ast.Expr) []reflect.Value {
 	case *ast.CompositeLit:
 		return []reflect.Value{sc.evalCompositeLit(e)}
 	case *ast.KeyValueExpr:
-		return sc.evalExpr(e.Value)
+		return sc.evalExpr(e.Value, nil)
 	case *ast.SelectorExpr:
 		return sc.evalSelectorExpr(e)
 	case *ast.FuncLit:
@@ -216,6 +224,8 @@ func (sc *scope) evalExpr(expr ast.Expr) []reflect.Value {
 		return sc.evalIndexExpr(e, zeroval, false)
 	case *ast.SliceExpr:
 		return []reflect.Value{sc.evalSliceExpr(e)}
+	case *ast.StarExpr:
+		return []reflect.Value{sc.evalStarExpr(e)}
 	}
 	sc.err("cannot handle %T expression", expr)
 	return nil // unreachable
@@ -225,7 +235,7 @@ func (sc *scope) evalExpr(expr ast.Expr) []reflect.Value {
 func (sc *scope) evalReturn(ret *ast.ReturnStmt) []reflect.Value {
 	var values []reflect.Value
 	for _, res := range ret.Results {
-		values = append(values, sc.evalExpr(res)[0])
+		values = append(values, sc.evalExpr(res, nil)[0])
 	}
 	return values
 }
@@ -238,6 +248,8 @@ func copyval(val reflect.Value) reflect.Value {
 
 // evalAssign evaluates an assignment statement.
 func (sc *scope) evalAssign(a *ast.AssignStmt) {
+	sc.traceAt(a, "here\n")
+
 	var (
 		values     []reflect.Value
 		valuetypes []types.Type
@@ -259,7 +271,7 @@ func (sc *scope) evalAssign(a *ast.AssignStmt) {
 		}
 
 		if rhsvalues == nil {
-			rhsvalues = sc.evalExpr(rhsexpr)
+			rhsvalues = sc.evalExpr(rhsexpr, nil)
 		}
 
 		for _, v := range rhsvalues {
@@ -281,6 +293,9 @@ func (sc *scope) evalAssign(a *ast.AssignStmt) {
 	for idx, lexpr := range a.Lhs {
 		switch expr := lexpr.(type) {
 		case *ast.Ident:
+			if expr.Name == underscore {
+				break
+			}
 			switch a.Tok {
 			case token.DEFINE:
 				v, ok := sc.lookupValue(expr.Name)
@@ -303,7 +318,7 @@ func (sc *scope) evalAssign(a *ast.AssignStmt) {
 				sc.err("cannot handle %v token in assignment", a.Tok)
 			}
 		case *ast.SelectorExpr:
-			val := sc.evalExpr(lexpr)[0]
+			val := sc.evalExpr(lexpr, nil)[0]
 			val.Set(values[idx])
 		case *ast.IndexExpr:
 			sc.evalIndexExpr(expr, values[idx], false)
@@ -343,7 +358,7 @@ func (sc *scope) evalAssignRecv(as *ast.AssignStmt, val reflect.Value, ok bool) 
 				sc.err("cannot handle %v token in assignment", as.Tok)
 			}
 		case *ast.SelectorExpr:
-			val := sc.evalExpr(lexpr)[0]
+			val := sc.evalExpr(lexpr, nil)[0]
 			val.Set(rhsval)
 		case *ast.IndexExpr:
 			sc.evalIndexExpr(expr, rhsval, false)
@@ -367,8 +382,8 @@ func (sc *scope) evalGo(gs *ast.GoStmt) {
 
 // evalSend evaluates a send statement.
 func (sc *scope) evalSend(ss *ast.SendStmt) {
-	chanv := sc.evalExpr(ss.Chan)[0]
-	val := sc.evalExpr(ss.Value)[0]
+	chanv := sc.evalExpr(ss.Chan, nil)[0]
+	val := sc.evalExpr(ss.Value, nil)[0]
 	chanv.Send(val)
 }
 
@@ -398,7 +413,7 @@ func (sc *scope) evalSelect(ss *ast.SelectStmt) {
 				switch expr.Op {
 				case token.ARROW:
 					dir = reflect.SelectRecv
-					chanv = sc.evalExpr(expr.X)[0]
+					chanv = sc.evalExpr(expr.X, nil)[0]
 				default:
 					sc.err("bogus unary op %v in expression statement in select", expr.Op)
 				}
@@ -413,7 +428,7 @@ func (sc *scope) evalSelect(ss *ast.SelectStmt) {
 				switch expr.Op {
 				case token.ARROW:
 					dir = reflect.SelectRecv
-					chanv = sc.evalExpr(expr.X)[0]
+					chanv = sc.evalExpr(expr.X, nil)[0]
 				default:
 					sc.err("bogus unary op %v in expression statement in select", expr.Op)
 				}
@@ -426,8 +441,8 @@ func (sc *scope) evalSelect(ss *ast.SelectStmt) {
 		case *ast.SendStmt:
 			// ch <- val
 			dir = reflect.SelectSend
-			chanv = sc.evalExpr(commstmt.Chan)[0]
-			sendv = sc.evalExpr(commstmt.Value)[0]
+			chanv = sc.evalExpr(commstmt.Chan, nil)[0]
+			sendv = sc.evalExpr(commstmt.Value, nil)[0]
 		}
 
 		cases = append(cases, reflect.SelectCase{
@@ -455,7 +470,7 @@ func (sc *scope) evalIf(is *ast.IfStmt) {
 	if is.Init != nil {
 		sc.eval(is.Init)
 	}
-	cond := sc.evalExpr(is.Cond)[0].Bool()
+	cond := sc.evalExpr(is.Cond, nil)[0].Bool()
 	if cond {
 		for _, stmt := range is.Body.List {
 			sc.eval(stmt)
@@ -477,7 +492,7 @@ func (sc *scope) evalFor(fs *ast.ForStmt) {
 	}
 	for {
 		if fs.Cond != nil {
-			cond := sc.evalExpr(fs.Cond)[0].Bool()
+			cond := sc.evalExpr(fs.Cond, nil)[0].Bool()
 			if !cond {
 				return
 			}
@@ -506,7 +521,7 @@ func (sc *scope) evalIncDec(ids *ast.IncDecStmt) {
 		sc.err("bogus token %v in IncDec statament", ids.Tok)
 	}
 
-	val := sc.evalExpr(ids.X)[0]
+	val := sc.evalExpr(ids.X, nil)[0]
 	val.Set(reflect.ValueOf(val.Int() + delta).Convert(val.Type()))
 }
 
@@ -519,40 +534,75 @@ func (sc *scope) evalSwitch(ss *ast.SwitchStmt) {
 
 	var tagval reflect.Value
 	if ss.Tag != nil {
-		tagval = sc.evalExpr(ss.Tag)[0]
+		tagval = sc.evalExpr(ss.Tag, nil)[0]
 	}
+
+	fallingthrough := false
 
 	for _, stmt := range ss.Body.List {
 		clause := stmt.(*ast.CaseClause)
 
-		var cases []reflect.Value
-		for _, expr := range clause.List {
-			cases = append(cases, sc.evalExpr(expr)[0])
-		}
+		if fallingthrough {
+			fallingthrough = false
 
-		if tagval != zeroval {
-			for _, c := range cases {
-				if tagval.Interface() == c.Interface() {
-					for _, stmt := range clause.Body {
-						sc.eval(stmt)
-					}
-					return
+			for _, stmt := range clause.Body {
+				switch {
+				case isFallthrough(stmt):
+					fallingthrough = true
+				default:
+					sc.eval(stmt)
 				}
 			}
-		} else {
-			for _, c := range cases {
-				if c.Bool() {
-					for _, stmt := range clause.Body {
-						sc.eval(stmt)
-					}
-					return
+
+			continue
+		}
+
+		var cases []reflect.Value
+		for _, expr := range clause.List {
+			if expr == nil {
+				// default
+				continue
+			}
+
+			var exprtype reflect.Type
+			if tagval != zeroval {
+				exprtype = tagval.Type()
+			}
+
+			cases = append(cases, sc.evalExpr(expr, exprtype)...)
+		}
+
+		for idx, c := range cases {
+			ok := false
+			switch {
+			case clause.List[idx] == nil:
+				ok = true
+			case tagval != zeroval:
+				if tagval.Type().Comparable() {
+					ok = tagval.Interface() == c.Interface()
+				} else {
+					ok = tagval.Interface() == nil
+				}
+			case tagval == zeroval:
+				ok = c.Bool()
+			}
+			if !ok {
+				continue
+			}
+
+			for _, stmt := range clause.Body {
+				switch {
+				case isFallthrough(stmt):
+					fallingthrough = true
+				default:
+					sc.eval(stmt)
 				}
 			}
 		}
 	}
 }
 
-// evalRange evaluates a Range statement.
+// evalRange evaluates a range statement.
 func (sc *scope) evalRange(rs *ast.RangeStmt) {
 	sc = sc.enter("")
 	switch sc.typeOf(rs.X).Kind() {
@@ -563,6 +613,11 @@ func (sc *scope) evalRange(rs *ast.RangeStmt) {
 	default:
 		sc.err("cannot valuate %T expression in range", rs.X)
 	}
+}
+
+// evalBranch evaluates a branch statement.
+func (sc *scope) evalBranch(bs *ast.BranchStmt) {
+	sc.errAt(bs, "cannot evaluate %v branch", bs.Tok)
 }
 
 const underscore = "_"
@@ -576,7 +631,7 @@ func (sc *scope) evalRangeSlice(rs *ast.RangeStmt) {
 		setValue bool
 	)
 
-	slicev := sc.evalExpr(rs.X)[0]
+	slicev := sc.evalExpr(rs.X, nil)[0]
 
 	if rs.Key != nil {
 		switch keyexpr := rs.Key.(type) {
@@ -588,7 +643,7 @@ func (sc *scope) evalRangeSlice(rs *ast.RangeStmt) {
 
 			switch rs.Tok {
 			case token.ASSIGN:
-				key = sc.evalExpr(keyexpr)[0]
+				key = sc.evalExpr(keyexpr, nil)[0]
 			case token.DEFINE:
 				keyptr := reflect.New(reflect.TypeOf(int(0)))
 				key = keyptr.Elem()
@@ -610,7 +665,7 @@ func (sc *scope) evalRangeSlice(rs *ast.RangeStmt) {
 
 			switch rs.Tok {
 			case token.ASSIGN:
-				value = sc.evalExpr(valexpr)[0]
+				value = sc.evalExpr(valexpr, nil)[0]
 			case token.DEFINE:
 				vtype := slicev.Type().Elem()
 				valptr := reflect.New(vtype)
@@ -677,6 +732,18 @@ func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 			return []reflect.Value{sc.evalBuiltinLen(call)}
 		case "cap":
 			return []reflect.Value{sc.evalBuiltinCap(call)}
+		case "print":
+			sc.evalBuiltinPrint(call)
+			return nil
+		case "panic":
+			sc.evalBuiltinPanic(call)
+			return nil
+		default:
+			typ, ok := builtinType[fexpr.Name]
+			if ok {
+				val := sc.evalExpr(call.Args[0], nil)[0]
+				return []reflect.Value{val.Convert(typ)}
+			}
 		}
 	case *ast.SelectorExpr:
 		switch x := fexpr.X.(type) {
@@ -695,14 +762,22 @@ func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 		default:
 			sc.err("cannot handle selector of type %T", fexpr.X)
 		}
+
 	case *ast.FuncLit:
 		fn = sc.evalFuncLit(fexpr)
+
+	case *ast.InterfaceType:
+		return []reflect.Value{sc.evalExpr(call.Args[0], nil)[0]}
+
+	case *ast.ParenExpr:
+		return sc.evalExpr(fexpr.X, nil)
+
 	default:
 		sc.err("cannot handle function expression of type %T", call.Fun)
 	}
 
 	if fn == zeroval {
-		sc.err("no function found")
+		sc.errAt(call.Fun, "no function found")
 		return nil // unreachable
 	}
 
@@ -733,10 +808,10 @@ func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 	processed := 0
 	for idx, arg := range call.Args {
 		if idx == len(call.Args)-1 && call.Ellipsis != token.NoPos {
-			varargs = reflect.AppendSlice(varargs, sc.evalExpr(arg)[0])
+			varargs = reflect.AppendSlice(varargs, sc.evalExpr(arg, nil)[0])
 			break
 		}
-		for _, argval := range sc.evalExpr(arg) {
+		for _, argval := range sc.evalExpr(arg, nil) {
 			idx := processed
 			if method {
 				idx++
@@ -879,15 +954,15 @@ func underlyingType(typ types.Type) types.Type {
 // evalBuiltinMakeSlice2 evaluates make([]T, 11) or make(SliceType, 12)
 func (sc *scope) evalBuiltinMakeSlice2(call *ast.CallExpr) reflect.Value {
 	typ := sc.typeOf(call.Args[0])
-	size := sc.evalExpr(call.Args[1])[0].Int()
+	size := sc.evalExpr(call.Args[1], nil)[0].Int()
 	return reflect.MakeSlice(typ, int(size), int(size))
 }
 
 // evalBuiltinMakeSlice3 evaluates make([]T, 11) or make(SliceType, 12)
 func (sc *scope) evalBuiltinMakeSlice3(call *ast.CallExpr) reflect.Value {
 	typ := sc.typeOf(call.Args[0])
-	size := sc.evalExpr(call.Args[1])[0].Int()
-	capacity := sc.evalExpr(call.Args[2])[0].Int()
+	size := sc.evalExpr(call.Args[1], nil)[0].Int()
+	capacity := sc.evalExpr(call.Args[2], nil)[0].Int()
 	return reflect.MakeSlice(typ, int(size), int(capacity))
 }
 
@@ -900,14 +975,14 @@ func (sc *scope) evalBuiltinMakeMap1(call *ast.CallExpr) reflect.Value {
 // evalBuiltinMakeMap2 evaluates make(map[K]V, 23) or make(MapType, 42).
 func (sc *scope) evalBuiltinMakeMap2(call *ast.CallExpr) reflect.Value {
 	typ := sc.typeOf(call.Args[0])
-	size := sc.evalExpr(call.Args[1])[0].Int()
+	size := sc.evalExpr(call.Args[1], nil)[0].Int()
 	return reflect.MakeMapWithSize(typ, int(size))
 }
 
 // evaluateBuiltinDelete evaluates delete(m, k).
 func (sc *scope) evalBuiltinDelete(call *ast.CallExpr) {
-	m := sc.evalExpr(call.Args[0])[0]
-	k := sc.evalExpr(call.Args[1])[0]
+	m := sc.evalExpr(call.Args[0], nil)[0]
+	k := sc.evalExpr(call.Args[1], nil)[0]
 	m.SetMapIndex(k, zeroval)
 }
 
@@ -920,23 +995,23 @@ func (sc *scope) evalBuiltinMakeChan1(call *ast.CallExpr) reflect.Value {
 // evalBuiltinMakeChan2 evaluates make(chan T, 10) or make(ChanType, 20).
 func (sc *scope) evalBuiltinMakeChan2(call *ast.CallExpr) reflect.Value {
 	typ := sc.typeOf(call.Args[0])
-	bufsize := sc.evalExpr(call.Args[1])[0].Int()
+	bufsize := sc.evalExpr(call.Args[1], nil)[0].Int()
 	return reflect.MakeChan(typ, int(bufsize))
 }
 
 // evalBuiltinClose evaluates close(ch).
 func (sc *scope) evalBuiltinClose(call *ast.CallExpr) {
-	ch := sc.evalExpr(call.Args[0])[0]
+	ch := sc.evalExpr(call.Args[0], nil)[0]
 	ch.Close()
 }
 
 // evalBuiltinAppend evaluates append(s, x), append(s, y, z) or append(s, k...).
 func (sc *scope) evalBuiltinAppend(call *ast.CallExpr) reflect.Value {
-	sval := sc.evalExpr(call.Args[0])[0]
+	sval := sc.evalExpr(call.Args[0], nil)[0]
 	varargs := reflect.MakeSlice(sval.Type(), 0, 0)
 
 	for _, rexpr := range call.Args[1:] {
-		for _, rval := range sc.evalExpr(rexpr) {
+		for _, rval := range sc.evalExpr(rexpr, nil) {
 			if rval.Kind() == reflect.Slice {
 				varargs = reflect.AppendSlice(varargs, rval)
 			} else {
@@ -950,14 +1025,38 @@ func (sc *scope) evalBuiltinAppend(call *ast.CallExpr) reflect.Value {
 
 // evalBuiltinLen evaluates len(s).
 func (sc *scope) evalBuiltinLen(call *ast.CallExpr) reflect.Value {
-	val := sc.evalExpr(call.Args[0])[0]
+	val := sc.evalExpr(call.Args[0], nil)[0]
 	return reflect.ValueOf(val.Len())
 }
 
 // evalBuiltinCap evaluates cap(s).
 func (sc *scope) evalBuiltinCap(call *ast.CallExpr) reflect.Value {
-	val := sc.evalExpr(call.Args[0])[0]
+	val := sc.evalExpr(call.Args[0], nil)[0]
 	return reflect.ValueOf(val.Cap())
+}
+
+// evalBuiltinPrint evaluates the builtin print.
+func (sc *scope) evalBuiltinPrint(call *ast.CallExpr) {
+	fmtprint := sc.std["fmt"].Func["Print"]
+	var args []reflect.Value
+
+	for _, argexpr := range call.Args {
+		args = append(args, sc.evalExpr(argexpr, nil)...)
+	}
+
+	fmtprint.Call(args)
+}
+
+// evalBuiltinPanic evaluates the builtin panic.
+//
+// For now, it panics in the interpreter, not in the guest.
+func (sc *scope) evalBuiltinPanic(call *ast.CallExpr) {
+	if len(call.Args) != 1 {
+		sc.errAt(call, "%d arguments to panic", len(call.Args))
+	}
+
+	val := sc.evalExpr(call.Args[0], nil)[0].Interface()
+	panic(val)
 }
 
 // evalIndexExpr evalueates b[0], s[x] = y and s["foo"] = 42.
@@ -966,8 +1065,8 @@ func (sc *scope) evalIndexExpr(idx *ast.IndexExpr, val reflect.Value, okform boo
 
 	switch lhstype.(type) {
 	case *types.Map:
-		lhs := sc.evalExpr(idx.X)[0]
-		key := sc.evalExpr(idx.Index)[0]
+		lhs := sc.evalExpr(idx.X, nil)[0]
+		key := sc.evalExpr(idx.Index, nil)[0]
 
 		if val != zeroval {
 			lhs.SetMapIndex(key, val)
@@ -983,8 +1082,8 @@ func (sc *scope) evalIndexExpr(idx *ast.IndexExpr, val reflect.Value, okform boo
 		}
 		return []reflect.Value{mval}
 	case *types.Slice:
-		index := sc.evalExpr(idx.Index)[0].Int()
-		sval := sc.evalExpr(idx.X)[0].Index(int(index))
+		index := sc.evalExpr(idx.Index, nil)[0].Int()
+		sval := sc.evalExpr(idx.X, nil)[0].Index(int(index))
 
 		if val != zeroval {
 			sval.Set(val)
@@ -1000,21 +1099,21 @@ func (sc *scope) evalIndexExpr(idx *ast.IndexExpr, val reflect.Value, okform boo
 
 // evalSliceExpr evaluates a slice expression.
 func (sc *scope) evalSliceExpr(se *ast.SliceExpr) reflect.Value {
-	sval := sc.evalExpr(se.X)[0]
+	sval := sc.evalExpr(se.X, nil)[0]
 
 	if se.Slice3 {
 		var low, high, max int
 
 		if se.Low != nil {
-			low = int(sc.evalExpr(se.Low)[0].Int())
+			low = int(sc.evalExpr(se.Low, nil)[0].Int())
 		}
 		if se.High != nil {
-			high = int(sc.evalExpr(se.High)[0].Int())
+			high = int(sc.evalExpr(se.High, nil)[0].Int())
 		} else {
 			high = sval.Len()
 		}
 		if se.Max != nil {
-			max = int(sc.evalExpr(se.Max)[0].Int())
+			max = int(sc.evalExpr(se.Max, nil)[0].Int())
 		} else {
 			max = sval.Cap()
 		}
@@ -1025,10 +1124,10 @@ func (sc *scope) evalSliceExpr(se *ast.SliceExpr) reflect.Value {
 	var low, high int
 
 	if se.Low != nil {
-		low = int(sc.evalExpr(se.Low)[0].Int())
+		low = int(sc.evalExpr(se.Low, nil)[0].Int())
 	}
 	if se.High != nil {
-		high = int(sc.evalExpr(se.High)[0].Int())
+		high = int(sc.evalExpr(se.High, nil)[0].Int())
 	} else {
 		high = sval.Len()
 	}
@@ -1036,13 +1135,18 @@ func (sc *scope) evalSliceExpr(se *ast.SliceExpr) reflect.Value {
 	return sval.Slice(low, high)
 }
 
-// evalIdent evaluates an identifier.
-func (sc *scope) evalIdent(ident *ast.Ident) reflect.Value {
+// evalStarExpr evaluates a star expression.
+func (sc *scope) evalStarExpr(se *ast.StarExpr) reflect.Value {
+	return zeroval
+}
+
+// evalIdent evaluates an identifier. type is non-nil if ident refers to nil.
+func (sc *scope) evalIdent(ident *ast.Ident, typ reflect.Type) reflect.Value {
 	if v, _ := sc.lookupValue(ident.Name); v != zeroval {
 		return v
 	}
 
-	if cv, _ := sc.lookupConst(ident.Name); cv != (types.TypeAndValue{}) {
+	if cv, _ := sc.lookupConst(ident.Name); cv != zeroTV {
 		val := cv.Value
 		switch val.Kind() {
 		case constant.Bool:
@@ -1057,8 +1161,18 @@ func (sc *scope) evalIdent(ident *ast.Ident) reflect.Value {
 		}
 	}
 
+	if ident.Name == "nil" {
+		return sc.evalNil(typ)
+	}
+
 	sc.err("value for identifier %s not found", ident.Name)
 	return zeroval // unreachable
+}
+
+// evalNil evaluates nil for the given type. typ.Kind() must be reflect.Ptr,
+// reflect.Interface, reflect.Chan, reflect.Map, or reflect.Slice.
+func (sc *scope) evalNil(typ reflect.Type) reflect.Value {
+	return reflect.Zero(typ)
 }
 
 // evalBasicLit evaluates a basic literal.
@@ -1089,12 +1203,13 @@ func (sc *scope) evalBasicLit(lit *ast.BasicLit) reflect.Value {
 func (sc *scope) evalUnaryExpr(ue *ast.UnaryExpr, okformrecv bool) []reflect.Value {
 	switch ue.Op {
 	case token.AND:
-		val := sc.evalExpr(ue.X)[0]
+		val := sc.evalExpr(ue.X, nil)[0]
 		ptr := reflect.New(val.Type())
 		ptr.Elem().Set(val)
 		return []reflect.Value{ptr}
+
 	case token.ARROW:
-		val := sc.evalExpr(ue.X)[0]
+		val := sc.evalExpr(ue.X, nil)[0]
 		v, ok := val.Recv()
 		if !ok {
 			v = reflect.Zero(val.Type().Elem())
@@ -1106,6 +1221,10 @@ func (sc *scope) evalUnaryExpr(ue *ast.UnaryExpr, okformrecv bool) []reflect.Val
 			return []reflect.Value{v, reflect.ValueOf(false)}
 		}
 		return []reflect.Value{v}
+
+	case token.NOT:
+		val := sc.evalExpr(ue.X, nil)[0]
+		return []reflect.Value{reflect.ValueOf(!val.Bool())}
 	default:
 		sc.err("cannot handle %v operand in unary expression", ue.Op)
 		return nil // unreachable
@@ -1114,8 +1233,8 @@ func (sc *scope) evalUnaryExpr(ue *ast.UnaryExpr, okformrecv bool) []reflect.Val
 
 // evalBinaryExpr evaluates a binary expression.
 func (sc *scope) evalBinaryExpr(be *ast.BinaryExpr) reflect.Value {
-	x := sc.evalExpr(be.X)[0]
-	y := sc.evalExpr(be.Y)[0]
+	x := sc.evalExpr(be.X, nil)[0]
+	y := sc.evalExpr(be.Y, nil)[0]
 	switch be.Op {
 	case token.ADD:
 		switch {
@@ -1146,9 +1265,16 @@ func (sc *scope) evalBinaryExpr(be *ast.BinaryExpr) reflect.Value {
 			res.Elem().SetBool(less)
 			return res.Elem()
 		}
+	case token.GTR:
+		if x.Type().ConvertibleTo(builtinType["int64"]) {
+			res := reflect.New(reflect.TypeOf(true))
+			less := x.Int() > y.Int()
+			res.Elem().SetBool(less)
+			return res.Elem()
+		}
 	}
 
-	sc.err("cannot evaluate binary expression of type %v", be.Op)
+	sc.errAt(be, "cannot evaluate binary expression of type %v", be.Op)
 	return zeroval // unreachable
 }
 
@@ -1191,14 +1317,14 @@ func (sc *scope) evalCompositeStructLit(cl *ast.CompositeLit) reflect.Value {
 			switch kexpr := expr.Key.(type) {
 			case *ast.Ident:
 				key := kexpr.Name
-				exprval := sc.evalExpr(expr.Value)[0]
+				exprval := sc.evalExpr(expr.Value, nil)[0]
 				val.Elem().FieldByName(key).Set(exprval)
 			default:
 				sc.err("cannot handle key expression of type %T in composite literal", expr.Key)
 			}
 
 		default:
-			val.Elem().Field(idx).Set(sc.evalExpr(elt)[0])
+			val.Elem().Field(idx).Set(sc.evalExpr(elt, nil)[0])
 		}
 	}
 
@@ -1210,7 +1336,7 @@ func (sc *scope) evalCompositeSliceLit(cl *ast.CompositeLit) reflect.Value {
 	sliceval := reflect.MakeSlice(sc.typeOf(cl.Type), 0, len(cl.Elts))
 
 	for _, elemexpr := range cl.Elts {
-		elem := sc.evalExpr(elemexpr)[0]
+		elem := sc.evalExpr(elemexpr, nil)[0]
 		sliceval = reflect.Append(sliceval, elem)
 	}
 
@@ -1219,7 +1345,7 @@ func (sc *scope) evalCompositeSliceLit(cl *ast.CompositeLit) reflect.Value {
 
 // evalSelectorExpr evaluates a selector expression.
 func (sc *scope) evalSelectorExpr(se *ast.SelectorExpr) []reflect.Value {
-	val := sc.evalExpr(se.X)[0]
+	val := sc.evalExpr(se.X, nil)[0]
 
 	var values []reflect.Value
 
@@ -1423,7 +1549,7 @@ func (sc *scope) evalVarDecl(gd *ast.GenDecl) {
 		for idx, name := range vspec.Names {
 			var val reflect.Value
 			if idx < len(vspec.Values) {
-				val = sc.evalExpr(vspec.Values[idx])[0]
+				val = sc.evalExpr(vspec.Values[idx], nil)[0]
 			} else {
 				valptr := reflect.New(sc.typeOf(vspec.Type))
 				val = valptr.Elem()
@@ -1519,6 +1645,18 @@ func (sc *scope) enter(name string) *scope {
 
 func (sc *scope) err(format string, args ...interface{}) {
 	panic(interpreterError(fmt.Sprintf(format, args...)))
+}
+
+func (sc *scope) errAt(n ast.Node, format string, args ...interface{}) {
+	format = "%v: " + format
+	args = append([]interface{}{sc.fset.Position(n.Pos())}, args...)
+	sc.err(format, args...)
+}
+
+func (sc *scope) traceAt(n ast.Node, format string, args ...interface{}) {
+	format = "at %v: " + format
+	args = append([]interface{}{sc.fset.Position(n.Pos())}, args...)
+	fmt.Printf(format, args...)
 }
 
 type interpreterError string
@@ -1645,4 +1783,12 @@ func reflectChanDir(dir types.ChanDir) reflect.ChanDir {
 	}
 }
 
-var zeroval = reflect.Value{}
+var (
+	zeroval = reflect.Value{}
+	zeroTV  = types.TypeAndValue{}
+)
+
+func isFallthrough(stmt ast.Stmt) bool {
+	bs, ok := stmt.(*ast.BranchStmt)
+	return ok && bs.Tok == token.FALLTHROUGH
+}

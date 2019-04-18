@@ -1,0 +1,1 @@
+A selection of tests from the Go compiler. See `$GOROOT/test`.

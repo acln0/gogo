@@ -14,10 +14,33 @@
 
 package gogo
 
-import "testing"
+import (
+	"io/ioutil"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestExec(t *testing.T) {
-	if err := Exec("testdata/gogotest.go"); err != nil {
+	/*
+		t.Run("gogotest", func(t *testing.T) {
+			if err := Exec("testdata/gogotest.go"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	*/
+
+	gotests, err := ioutil.ReadDir("testdata/gotests")
+	if err != nil {
 		t.Fatal(err)
+	}
+	for _, testfile := range gotests {
+		name := strings.TrimSuffix(testfile.Name(), ".go")
+		t.Run(name, func(t *testing.T) {
+			gofile := filepath.Join("testdata/gotests", testfile.Name())
+			if err := Exec(gofile); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

@@ -17,6 +17,7 @@ package gogo
 import (
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
 	"time"
 )
@@ -35,9 +36,15 @@ var stdlib = map[string]pkg{
 	},
 	"fmt": {
 		Func: map[string]reflect.Value{
+			"Print":   reflect.ValueOf(fmt.Print),
 			"Println": reflect.ValueOf(fmt.Println),
 			"Printf":  reflect.ValueOf(fmt.Printf),
 			"Sprintf": reflect.ValueOf(fmt.Sprintf),
+		},
+	},
+	"os": {
+		Func: map[string]reflect.Value{
+			"Exit": reflect.ValueOf(os.Exit),
 		},
 	},
 	"time": {
