@@ -16,6 +16,7 @@ package gogo
 
 import (
 	"io/ioutil"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -38,7 +39,17 @@ func TestExec(t *testing.T) {
 		name := strings.TrimSuffix(testfile.Name(), ".go")
 		t.Run(name, func(t *testing.T) {
 			gofile := filepath.Join("testdata/gotests", testfile.Name())
-			if err := Exec(gofile); err != nil {
+			src, err := os.Open(gofile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer src.Close()
+			interp := &Interpreter{
+				Source:   src,
+				Filename: gofile,
+				Entry:    "main",
+			}
+			if err := interp.Run(); err != nil {
 				t.Fatal(err)
 			}
 		})

@@ -22,13 +22,7 @@ import (
 	"time"
 )
 
-// pkg represents a Go package
-type pkg struct {
-	// Func maps package-level functions
-	Func map[string]reflect.Value
-}
-
-var stdlib = map[string]pkg{
+var stdlib = Runtime{
 	"errors": {
 		Func: map[string]reflect.Value{
 			"New": reflect.ValueOf(errors.New),
@@ -54,4 +48,9 @@ var stdlib = map[string]pkg{
 			"Sleep": reflect.ValueOf(time.Sleep),
 		},
 	},
+}
+
+// Stdlib returns the standard library runtime.
+func Stdlib() Runtime {
+	return stdlib
 }

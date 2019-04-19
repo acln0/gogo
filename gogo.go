@@ -23,45 +23,88 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
-	"os"
+	"io"
 	"reflect"
 	"strconv"
-	"strings"
 	"unsafe"
 )
 
-// Exec executes the Go source file specified by srcfile.
-func Exec(srcfile string) (err error) {
-	fset := token.NewFileSet()
-	src, err := os.Open(srcfile)
-	if err != nil {
-		return err
-	}
-	f, err := parser.ParseFile(fset, srcfile, src, 0)
-	if err != nil {
-		return err
-	}
+// Interpreter configures a Go interpreter.
+type Interpreter struct {
+	// Source supplies the Go source code to be interpreted.
+	Source io.Reader
 
+	// Filename is an optional file name to be associated with the code
+	// specified in Source.
+	Filename string
+
+	// Runtime is the runtime context associated with the interpreter.
+	// If Runtime is nil, the runtime returned by Stdlib is used.
+	Runtime Runtime
+
+	// Entry specifies the entry point into the interpreter. It must
+	// refer to a function declared at package scope in the source
+	// file read from Source.
+	//
+	// If Entry is not set, it defaults to "main".
+	Entry string
+
+	// Args contains the arguments to call the entry function with.
+	Args []reflect.Value
+
+	// Result contains the values returned by the entry function,
+	// if any. Result can be read after Exec returns.
+	Result []reflect.Value
+
+	// fset holds the top level file set.
+	fset *token.FileSet
+
+	// typeinfo holds type information.
+	typeinfo *types.Info
+
+	// pkg holds the type checked package.
+	pkg *types.Package
+}
+
+// Runtime is a runtime context for an interpreter.
+type Runtime map[string]RuntimePackage
+
+// A RuntimePackage contains runtime values and type information for
+// a Go package accessible to an Interpreter at runtime.
+type RuntimePackage struct {
+	Func map[string]reflect.Value
+}
+
+// Run runs the interpreter.
+func (interp *Interpreter) Run() (err error) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, interp.Filename, interp.Source, 0)
+	if err != nil {
+		return err
+	}
 	typecfg := &types.Config{
 		Importer: importer.ForCompiler(fset, "gc", nil),
 		Error:    func(err error) { fmt.Println(err) },
 	}
-	info := &types.Info{
+	typeinfo := &types.Info{
 		Types:      make(map[ast.Expr]types.TypeAndValue),
 		Defs:       make(map[*ast.Ident]types.Object),
 		Implicits:  make(map[ast.Node]types.Object),
 		Selections: make(map[*ast.SelectorExpr]*types.Selection),
 		Scopes:     make(map[ast.Node]*types.Scope),
 	}
-	pkg, err := typecfg.Check("main", fset, []*ast.File{f}, info)
+	pkgname := f.Name.Name
+	pkg, err := typecfg.Check(pkgname, fset, []*ast.File{f}, typeinfo)
 	if err != nil {
 		return err
 	}
 
+	interp.fset = fset
+	interp.typeinfo = typeinfo
+	interp.pkg = pkg
+
 	pkgscope := newScope(nil)
-	pkgscope.typeinfo = info
-	pkgscope.pkg = pkg
-	pkgscope.fset = fset
+	pkgscope.interp = interp
 
 	/*
 		defer func() {
@@ -90,12 +133,16 @@ func Exec(srcfile string) (err error) {
 	pkgscope.values["true"] = reflect.ValueOf(true)
 	pkgscope.values["false"] = reflect.ValueOf(false)
 
-	main, ok := pkgscope.funcs["main"]
+	entry := interp.Entry
+	if entry == "" {
+		entry = "main"
+	}
+	entryfn, ok := pkgscope.funcs[entry]
 	if !ok {
-		return errors.New("missing main function")
+		return errors.New("missing entry function")
 	}
 
-	main.Call(nil)
+	interp.Result = entryfn.Call(interp.Args)
 
 	return nil
 }
@@ -106,8 +153,8 @@ type scope struct {
 	// top-level package scope.
 	parent *scope
 
-	// std holds standard library packages.
-	std map[string]pkg
+	// interp is the interpreter associated with the scope.
+	interp *Interpreter
 
 	// value maps identifiers to runtime values.
 	values map[string]reflect.Value
@@ -127,21 +174,11 @@ type scope struct {
 
 	// types maps type names to runtime types.
 	types map[string]reflect.Type
-
-	// typeinfo holds type information.
-	typeinfo *types.Info
-
-	// pkg holds the type checked package.
-	pkg *types.Package
-
-	// fset holds the top level file set.
-	fset *token.FileSet
 }
 
 func newScope(parent *scope) *scope {
 	sc := &scope{
 		parent:     parent,
-		std:        stdlib,
 		values:     make(map[string]reflect.Value),
 		valuetypes: make(map[string]types.Type),
 		consts:     make(map[string]types.TypeAndValue),
@@ -150,9 +187,7 @@ func newScope(parent *scope) *scope {
 		types:      make(map[string]reflect.Type),
 	}
 	if parent != nil {
-		sc.typeinfo = parent.typeinfo
-		sc.pkg = parent.pkg
-		sc.fset = parent.fset
+		sc.interp = parent.interp
 	}
 	return sc
 }
@@ -248,8 +283,6 @@ func copyval(val reflect.Value) reflect.Value {
 
 // evalAssign evaluates an assignment statement.
 func (sc *scope) evalAssign(a *ast.AssignStmt) {
-	sc.traceAt(a, "here\n")
-
 	var (
 		values     []reflect.Value
 		valuetypes []types.Type
@@ -278,7 +311,7 @@ func (sc *scope) evalAssign(a *ast.AssignStmt) {
 			values = append(values, v)
 
 			var vtype types.Type
-			tt, ok := sc.typeinfo.Types[rhsexpr]
+			tt, ok := sc.interp.typeinfo.Types[rhsexpr]
 			if ok {
 				vtype = tt.Type
 			}
@@ -348,7 +381,7 @@ func (sc *scope) evalAssignRecv(as *ast.AssignStmt, val reflect.Value, ok bool) 
 				} else {
 					sc.values[expr.Name] = rhsval
 					rexpr := as.Rhs[0].(*ast.UnaryExpr).X
-					rtype := sc.typeinfo.Types[rexpr].Type
+					rtype := sc.interp.typeinfo.Types[rexpr].Type
 					sc.valuetypes[expr.Name] = rtype
 				}
 			case token.ASSIGN:
@@ -750,7 +783,7 @@ func (sc *scope) evalCallExpr(call *ast.CallExpr) []reflect.Value {
 		case *ast.Ident:
 			if x.Obj == nil {
 				// stdlib
-				if f, ok := sc.std[x.Name].Func[fexpr.Sel.Name]; ok {
+				if f, ok := sc.interp.Runtime[x.Name].Func[fexpr.Sel.Name]; ok {
 					fn = f
 				}
 			} else {
@@ -889,7 +922,7 @@ func (sc *scope) lookupMethod(vtype types.Type, se *ast.SelectorExpr) (reflect.V
 // evalBuiltinMake calls the builtin make function.
 func (sc *scope) evalBuiltinMake(call *ast.CallExpr) []reflect.Value {
 	var argtype makeArgType
-	switch ut := underlyingType(sc.typeinfo.Types[call.Args[0]].Type); ut.(type) {
+	switch ut := underlyingType(sc.interp.typeinfo.Types[call.Args[0]].Type); ut.(type) {
 	case *types.Slice:
 		argtype = sliceMakeArg
 	case *types.Map:
@@ -1037,7 +1070,7 @@ func (sc *scope) evalBuiltinCap(call *ast.CallExpr) reflect.Value {
 
 // evalBuiltinPrint evaluates the builtin print.
 func (sc *scope) evalBuiltinPrint(call *ast.CallExpr) {
-	fmtprint := sc.std["fmt"].Func["Print"]
+	fmtprint := sc.interp.Runtime["fmt"].Func["Print"]
 	var args []reflect.Value
 
 	for _, argexpr := range call.Args {
@@ -1061,7 +1094,7 @@ func (sc *scope) evalBuiltinPanic(call *ast.CallExpr) {
 
 // evalIndexExpr evalueates b[0], s[x] = y and s["foo"] = 42.
 func (sc *scope) evalIndexExpr(idx *ast.IndexExpr, val reflect.Value, okform bool) []reflect.Value {
-	lhstype := sc.typeinfo.Types[idx.X].Type
+	lhstype := sc.interp.typeinfo.Types[idx.X].Type
 
 	switch lhstype.(type) {
 	case *types.Map:
@@ -1512,7 +1545,7 @@ func (sc *scope) funcName(name *ast.Ident, recv *ast.FieldList) string {
 
 // typeName returns the name of a type.
 func (sc *scope) typeName(expr ast.Expr) string {
-	return sc.typeinfo.Types[expr].Type.String()
+	return sc.interp.typeinfo.Types[expr].Type.String()
 }
 
 // evalGenDecl evaluates a declaration.
@@ -1537,7 +1570,7 @@ func (sc *scope) evalConstDecl(gd *ast.GenDecl) {
 		vspec := spec.(*ast.ValueSpec)
 		for idx, name := range vspec.Names {
 			vexpr := vspec.Values[idx]
-			sc.consts[name.Name] = sc.typeinfo.Types[vexpr]
+			sc.consts[name.Name] = sc.interp.typeinfo.Types[vexpr]
 		}
 	}
 }
@@ -1562,23 +1595,14 @@ func (sc *scope) evalVarDecl(gd *ast.GenDecl) {
 // evalImportDecl evaluates an import declaration. Only standard library
 // imports are supported for now.
 func (sc *scope) evalImportDecl(gd *ast.GenDecl) {
-	for _, spec := range gd.Specs {
-		i := spec.(*ast.ImportSpec)
-		path := strings.Trim(i.Path.Value, `"`)
-		stdpkg, ok := stdlib[path]
-		if !ok {
-			sc.err("non-stdlib import path %s", path)
-		}
-
-		sc.std[path] = stdpkg
-	}
+	// TODO(acln): check imports
 }
 
 // evalTypeDecl evaluates a type declaration.
 func (sc *scope) evalTypeDecl(gd *ast.GenDecl) {
 	for _, spec := range gd.Specs {
 		ts := spec.(*ast.TypeSpec)
-		name := fmt.Sprintf("%s.%s", sc.pkg.Name(), ts.Name)
+		name := fmt.Sprintf("%s.%s", sc.interp.pkg.Name(), ts.Name)
 		typ := sc.typeOf(ts.Type)
 		sc.types[name] = typ
 	}
@@ -1649,13 +1673,13 @@ func (sc *scope) err(format string, args ...interface{}) {
 
 func (sc *scope) errAt(n ast.Node, format string, args ...interface{}) {
 	format = "%v: " + format
-	args = append([]interface{}{sc.fset.Position(n.Pos())}, args...)
+	args = append([]interface{}{sc.interp.fset.Position(n.Pos())}, args...)
 	sc.err(format, args...)
 }
 
 func (sc *scope) traceAt(n ast.Node, format string, args ...interface{}) {
 	format = "at %v: " + format
-	args = append([]interface{}{sc.fset.Position(n.Pos())}, args...)
+	args = append([]interface{}{sc.interp.fset.Position(n.Pos())}, args...)
 	fmt.Printf(format, args...)
 }
 
@@ -1712,7 +1736,7 @@ func (sc *scope) typeOfField(f *ast.Field) reflect.Type {
 }
 
 func (sc *scope) typeOf(expr ast.Expr) reflect.Type {
-	return sc.dynamicType(sc.typeinfo.Types[expr].Type)
+	return sc.dynamicType(sc.interp.typeinfo.Types[expr].Type)
 }
 
 func (sc *scope) dynamicType(typ types.Type) reflect.Type {
