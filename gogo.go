@@ -106,20 +106,18 @@ func (interp *Interpreter) Run() (err error) {
 	pkgscope := newScope(nil)
 	pkgscope.interp = interp
 
-	/*
-		defer func() {
-			if r := recover(); r != nil {
-				e, ok := r.(error)
-				if !ok {
-					panic(r)
-				}
-				if _, interp := e.(interpreterError); !interp {
-					panic(r)
-				}
-				err = e
+	defer func() {
+		if r := recover(); r != nil {
+			e, ok := r.(error)
+			if !ok {
+				panic(r)
 			}
-		}()
-	*/
+			if _, interp := e.(interpreterError); !interp {
+				panic(r)
+			}
+			err = e
+		}
+	}()
 
 	for _, decl := range f.Decls {
 		switch d := decl.(type) {
@@ -281,48 +279,111 @@ func copyval(val reflect.Value) reflect.Value {
 	return newval.Elem()
 }
 
-// evalAssign evaluates an assignment statement.
+// evalAssign evaluates an assignment.
 func (sc *scope) evalAssign(a *ast.AssignStmt) {
+	// Assignments have many forms. These are the basic patterns we are
+	// looking for:
+	//
+	//     mv, ok := m[k]
+	//
+	//     chv, ok := <-ch
+	//
+	//     x, err := fn()
+	//
+	//     host, port, err := net.SplitHostPort("...")
+	//
+	//     y, z = z, y
+	//
+	//     p, q := 4, true
+	//
+	// The first four are unbalanced, whereas the final two are
+	// balanced. We handle these in subtly different ways.
+	//
+	// For unbalanced expressions, we evaluate the RHS up-front, then
+	// assign or define on the LHS. For balanced expressions, a bit
+	// more care is needed, since the RHS could contain basic literals,
+	// or constants.
+	//
+	// Tackle the simpler unbalanced case first.
+	if len(a.Lhs) != len(a.Rhs) {
+		rexpr := a.Rhs[0]
+
+		iexpr, isIndexExpr := rexpr.(*ast.IndexExpr)
+		uexpr, isUnaryExpr := rexpr.(*ast.UnaryExpr)
+
+		switch {
+		case isIndexExpr:
+			sc.doAssign(a, sc.evalIndexExpr(iexpr, zeroval, true))
+		case isUnaryExpr:
+			sc.doAssign(a, sc.evalUnaryExpr(uexpr, true))
+		default:
+			sc.doAssign(a, sc.evalExpr(rexpr, nil))
+		}
+		return
+	}
+
+	// Here, we are on the balanced code path. All expressions on the
+	// RHS yield a single value. We map indexes from the RHS to either
+	// runtime values or constants.
 	var (
-		values     []reflect.Value
-		valuetypes []types.Type
+		rhsvalues = map[int]reflect.Value{}
+		rhsconsts = map[int]types.TypeAndValue{}
 	)
-
-	for _, rhsexpr := range a.Rhs {
-		var rhsvalues []reflect.Value
-
-		iexpr, isIndexExpr := rhsexpr.(*ast.IndexExpr)
-		if isIndexExpr && len(a.Lhs) > len(a.Rhs) {
-			// v, ok := m[k]
-			rhsvalues = sc.evalIndexExpr(iexpr, zeroval, true)
+	for i, rexpr := range a.Rhs {
+		tv := sc.interp.typeinfo.Types[rexpr]
+		if tv.Value == nil {
+			rhsvalues[i] = sc.evalExpr(rexpr, nil)[0]
+		} else {
+			rhsconsts[i] = tv
 		}
+	}
 
-		uexpr, isUnaryExpr := rhsexpr.(*ast.UnaryExpr)
-		if isUnaryExpr && uexpr.Op == token.ARROW && len(a.Lhs) > len(a.Rhs) {
-			// v, ok := <-ch
-			rhsvalues = sc.evalUnaryExpr(uexpr, true)
-		}
+	// Now that the RHS is evaluated, construct the actual RHS values.
+	// If there are constants on the RHS, figure out the corresponding
+	// types from the LHS, and construct correctly typed values.
+	values := make([]reflect.Value, len(rhsvalues)+len(rhsconsts))
+	for i, val := range rhsvalues {
+		values[i] = copyval(val)
+	}
+	for i, tv := range rhsconsts {
+		values[i] = sc.constAsTypeOfExpr(tv.Value, a.Rhs[i])
+	}
 
-		if rhsvalues == nil {
-			rhsvalues = sc.evalExpr(rhsexpr, nil)
-		}
+	sc.doAssign(a, values)
+}
 
-		for _, v := range rhsvalues {
-			values = append(values, v)
+func (sc *scope) constAsTypeOfExpr(cval constant.Value, expr ast.Expr) reflect.Value {
+	var constval reflect.Value
 
-			var vtype types.Type
-			tt, ok := sc.interp.typeinfo.Types[rhsexpr]
-			if ok {
-				vtype = tt.Type
+	switch typ := sc.interp.typeinfo.Types[expr].Type.(type) {
+	case *types.Basic:
+		switch info := typ.Info(); {
+		case info&types.IsInteger != 0:
+			switch {
+			case info&types.IsUnsigned != 0:
+				val, _ := constant.Uint64Val(cval)
+				constval = reflect.ValueOf(val)
+			default:
+				val, _ := constant.Int64Val(cval)
+				constval = reflect.ValueOf(val)
 			}
-			valuetypes = append(valuetypes, vtype)
+		case info&types.IsFloat != 0:
+			val, _ := constant.Float64Val(cval)
+			constval = reflect.ValueOf(val)
+		default:
+			sc.errAt(expr, "cannot handle %v type", info)
 		}
+	default:
+		sc.errAt(expr, "cannot handle %T const type", typ)
 	}
 
-	for i := 0; i < len(values); i++ {
-		values[i] = copyval(values[i]) // don't break on x, y = y, x
-	}
+	exprtype := sc.typeOf(expr)
+	slot := reflect.New(exprtype)
+	slot.Elem().Set(constval.Convert(exprtype))
+	return slot.Elem()
+}
 
+func (sc *scope) doAssign(a *ast.AssignStmt, values []reflect.Value) {
 	for idx, lexpr := range a.Lhs {
 		switch expr := lexpr.(type) {
 		case *ast.Ident:
@@ -336,7 +397,6 @@ func (sc *scope) evalAssign(a *ast.AssignStmt) {
 					v.Set(values[idx])
 				} else {
 					sc.values[expr.Name] = values[idx]
-					sc.valuetypes[expr.Name] = valuetypes[idx]
 				}
 			case token.ASSIGN:
 				v, _ := sc.lookupValue(expr.Name)
@@ -1181,7 +1241,7 @@ func (sc *scope) evalIdent(ident *ast.Ident, typ reflect.Type) reflect.Value {
 
 	if cv, _ := sc.lookupConst(ident.Name); cv != zeroTV {
 		val := cv.Value
-		switch val.Kind() {
+		switch kind := val.Kind(); kind {
 		case constant.Bool:
 			return reflect.ValueOf(constant.BoolVal(val))
 		case constant.String:
@@ -1190,7 +1250,7 @@ func (sc *scope) evalIdent(ident *ast.Ident, typ reflect.Type) reflect.Value {
 			intval, _ := constant.Int64Val(val)
 			return reflect.ValueOf(intval)
 		default:
-			sc.err("cannot handle %v constant", val.String())
+			sc.errAt(ident, "cannot handle %v constant %s", kind, ident.Name)
 		}
 	}
 
@@ -1266,10 +1326,10 @@ func (sc *scope) evalUnaryExpr(ue *ast.UnaryExpr, okformrecv bool) []reflect.Val
 
 // evalBinaryExpr evaluates a binary expression.
 func (sc *scope) evalBinaryExpr(be *ast.BinaryExpr) reflect.Value {
-	x := sc.evalExpr(be.X, nil)[0]
-	y := sc.evalExpr(be.Y, nil)[0]
 	switch be.Op {
 	case token.ADD:
+		x := sc.evalExpr(be.X, nil)[0]
+		y := sc.evalExpr(be.Y, nil)[0]
 		switch {
 		case x.Type().ConvertibleTo(builtinType["int64"]):
 			res := reflect.New(x.Type())
@@ -1281,17 +1341,18 @@ func (sc *scope) evalBinaryExpr(be *ast.BinaryExpr) reflect.Value {
 			return res.Elem()
 		}
 	case token.MUL:
+		x := sc.evalExpr(be.X, nil)[0]
+		y := sc.evalExpr(be.Y, nil)[0]
 		if x.Type().ConvertibleTo(builtinType["int64"]) {
 			res := reflect.New(x.Type())
 			res.Elem().SetInt(sc.evalIntMul(x, y).Int())
 			return res.Elem()
 		}
 	case token.EQL:
-		res := reflect.New(reflect.TypeOf(true))
-		equal := reflect.DeepEqual(x.Interface(), y.Interface())
-		res.Elem().SetBool(equal)
-		return res.Elem()
+		return sc.evalEqual(be.X, be.Y)
 	case token.LSS:
+		x := sc.evalExpr(be.X, nil)[0]
+		y := sc.evalExpr(be.Y, nil)[0]
 		if x.Type().ConvertibleTo(builtinType["int64"]) {
 			res := reflect.New(reflect.TypeOf(true))
 			less := x.Int() < y.Int()
@@ -1299,6 +1360,8 @@ func (sc *scope) evalBinaryExpr(be *ast.BinaryExpr) reflect.Value {
 			return res.Elem()
 		}
 	case token.GTR:
+		x := sc.evalExpr(be.X, nil)[0]
+		y := sc.evalExpr(be.Y, nil)[0]
 		if x.Type().ConvertibleTo(builtinType["int64"]) {
 			res := reflect.New(reflect.TypeOf(true))
 			less := x.Int() > y.Int()
@@ -1324,6 +1387,79 @@ func (sc *scope) evalIntMul(x, y reflect.Value) reflect.Value {
 // evalStringAdd evaluates x + y, where x and y are strings.
 func (sc *scope) evalStringAdd(x, y reflect.Value) reflect.Value {
 	return reflect.ValueOf(x.String() + y.String())
+}
+
+// evalEqual evaluates ==.
+func (sc *scope) evalEqual(lhs, rhs ast.Expr) reflect.Value {
+	lhstv := sc.interp.typeinfo.Types[lhs]
+	rhstv := sc.interp.typeinfo.Types[rhs]
+
+	switch lhstyp := lhstv.Type.(type) {
+	case *types.Basic:
+		switch info := lhstyp.Info(); {
+		case info&types.IsUntyped != 0:
+			return sc.equalExprUntyped(rhs, rhstv, lhstv.Value)
+		default:
+			return sc.equalExprTyped(lhs, rhs, lhstv, rhstv)
+		}
+	default:
+		sc.errAt(lhs, "cannot handle %T expression", lhstyp)
+	}
+
+	lhsval := sc.evalExpr(lhs, nil)[0]
+	rhsval := sc.evalExpr(rhs, nil)[0]
+
+	res := reflect.New(reflect.TypeOf(true))
+	equal := reflect.DeepEqual(lhsval.Interface(), rhsval.Interface())
+	res.Elem().SetBool(equal)
+	return res.Elem()
+}
+
+// equalExprTyped evaluates <lhs> == <rhs>, where lhs is typed, but rhs may
+// or may not be typed.
+func (sc *scope) equalExprTyped(lhs, rhs ast.Expr, lhstv, rhstv types.TypeAndValue) reflect.Value {
+	lval := sc.evalExpr(lhs, nil)[0]
+
+	switch rhstyp := rhstv.Type.(type) {
+	case *types.Basic:
+		switch info := rhstyp.Info(); {
+		case info&types.IsUntyped != 0:
+			return sc.equalExprUntyped(lhs, lhstv, rhstv.Value)
+		default:
+			var rval reflect.Value
+			if rhstv.Value != nil {
+				rval = sc.constAsTypeOfExpr(rhstv.Value, rhs)
+			} else {
+				rval = sc.evalExpr(rhs, nil)[0]
+			}
+			return reflect.ValueOf(lval.Interface() == rval.Interface())
+		}
+	default:
+		sc.errAt(rhs, "cannot handle %T RHS expression", rhstyp)
+	}
+	return reflect.Value{} // unreachable
+}
+
+// equalExprUntyped evaluates <expr> == <val>, where val is untyped, and expr
+// has the specified type and value.
+func (sc *scope) equalExprUntyped(expr ast.Expr, exprtv types.TypeAndValue, val constant.Value) reflect.Value {
+	switch exprtyp := exprtv.Type.(type) {
+	case *types.Basic:
+		switch {
+		case exprtyp.Info()&types.IsUntyped != 0:
+			return sc.equalUntyped(exprtv.Value, val)
+		default:
+			sc.errAt(expr, "cannot handle basic kind %s", exprtyp.Name())
+		}
+	default:
+		sc.errAt(expr, "cannot handle %T expression", exprtyp)
+	}
+	return reflect.Value{} // unreachable
+}
+
+// equalUntyped evaluates == for untyped values.
+func (sc *scope) equalUntyped(lhs, rhs constant.Value) reflect.Value {
+	return reflect.ValueOf(constant.Compare(lhs, token.EQL, rhs))
 }
 
 // evalCompositeLit evaluates a composite literal expression.
